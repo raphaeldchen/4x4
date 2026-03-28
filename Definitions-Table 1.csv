@@ -1,8 +1,0 @@
-Data Type,Definition,,,
-Interval,"30-minute period of the day when calls were offered. In 24-hour, Eastern Time. (EX: 13:00 is 1PM-1:30PM).",,,
-Service Level,"Percentage of calls answered within target. (EX: 20 second target, how many calls were answered in 20 seconds or less).",,,
-Call Volume,Total number of incoming calls (answered + abandoned).,,,
-Abandoned Calls,Total number of callers who hung up before call was answered.,,,
-Abandoned Rate,Percentage of total callers who hung up before call was answered.,,,
-CCT,"Customer Care Time. Average time it takes an agent to handle each call. Includes Talk Time, Hold Time, and time notating & actioning account after the call.",,,
-Daily Staffing,Total number of Full Time Agents scheduled daily for each servicing group.,,,
