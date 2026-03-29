@@ -4,6 +4,18 @@ import math
 import os
 
 GROUPS = ['a', 'b', 'c', 'd']
+
+# Months to include when building the interval shape (1=Jan ... 12=Dec).
+# Must match SHAPE_MONTHS in intraday_shape.py.
+# Options: [4, 5, 6] = Apr-Jun (full dataset), [6] = June only
+SHAPE_MONTHS = [4, 5, 6]
+
+# Weight multiplier for the most recent month vs earlier months.
+# e.g. RECENCY_WEIGHT = 1 repeats the most recent month's observations 2×,
+# giving it twice the influence on the shape means.
+# Set to 1 for equal weighting.
+RECENCY_WEIGHT = 1
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INPUT_DIR = os.path.join(BASE_DIR, 'cleaned_data')
 OUTPUT_FILE = os.path.join(BASE_DIR, 'cleaned_data', 'interval_aggregated.csv')
@@ -35,12 +47,19 @@ for group in GROUPS:
         for row in reader:
             if not row['DateTime']:
                 continue
+            # Filter to SHAPE_MONTHS only
+            month = int(row['DateTime'].strip().split('-')[1])
+            if month not in SHAPE_MONTHS:
+                continue
             dow, interval = parse_datetime(row['DateTime'])
             key = (group.upper(), dow, interval)
+            # Repeat most recent month's observations by RECENCY_WEIGHT
+            most_recent = max(SHAPE_MONTHS)
+            repeat = RECENCY_WEIGHT if month == most_recent else 1
             for col, metric_key in zip(METRICS, METRIC_KEYS):
                 try:
                     val = float(row[col])
-                    data[key][metric_key].append(val)
+                    data[key][metric_key].extend([val] * repeat)
                 except (ValueError, KeyError):
                     pass
                 

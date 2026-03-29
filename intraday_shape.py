@@ -7,6 +7,10 @@ Daily means and staffing are computed from April-June 2025 data only.
 import pandas as pd
 
 GROUPS = ['a', 'b', 'c', 'd']
+
+# Must match SHAPE_MONTHS in agg.py.
+SHAPE_MONTHS = [4, 5, 6]
+
 METRICS = [
     ('mean_call_volume',    'Call Volume'),
     ('mean_service_level',  'Service Level'),
@@ -20,7 +24,7 @@ daily_frames = []
 for group in GROUPS:
     df = pd.read_csv(f'cleaned_data/{group}_daily_cleaned.csv', encoding='utf-8-sig')
     df['Date'] = pd.to_datetime(df['Date'], format='%m/%d/%y')
-    df = df[(df['Date'].dt.year == 2025) & df['Date'].dt.month.between(4, 6)]
+    df = df[(df['Date'].dt.year == 2025) & df['Date'].dt.month.isin(SHAPE_MONTHS)]
     df['day_of_week'] = df['Date'].dt.day_name()
     df['group'] = group.upper()
     daily_frames.append(df)
@@ -44,7 +48,7 @@ daily_means = (
 
 staffing = pd.read_csv('cleaned_data/daily_staffing_cleaned.csv', encoding='utf-8-sig')
 staffing['Date'] = pd.to_datetime(staffing['Date'], format='%m/%d/%y')
-staffing = staffing[(staffing['Date'].dt.year == 2025) & staffing['Date'].dt.month.between(4, 6)]
+staffing = staffing[(staffing['Date'].dt.year == 2025) & staffing['Date'].dt.month.isin(SHAPE_MONTHS)]
 staffing['day_of_week'] = staffing['Date'].dt.day_name()
 
 # Melt wide (A, B, C, D columns) to long form so we can join on (group, day_of_week)
@@ -93,6 +97,23 @@ shape = shape.rename(columns={
     'mean_abandoned_rate': 'interval_abandoned_rate',
     'mean_cct':            'interval_cct',
 })
+
+# If SHAPE_MONTHS excludes some months, certain (group, DOW, interval) combos
+# may be missing. Fill gaps using the full Apr-Jun shape as a fallback.
+if len(shape) < 1344:
+    fallback = pd.read_csv('cleaned_data/intraday_shape_aprijun.csv', encoding='utf-8-sig')
+    shape = (
+        fallback[['group', 'day_of_week', 'interval']]
+        .merge(shape[output_cols], on=['group', 'day_of_week', 'interval'], how='left')
+    )
+    for col in output_cols:
+        if col not in shape.columns:
+            shape[col] = fallback[col]
+    # Fill any remaining NaN shape columns from fallback
+    for col in [c for c in output_cols if c.startswith('shape_') or c.startswith('daily_') or c.startswith('interval_')]:
+        shape[col] = shape[col].fillna(fallback[col])
+    missing = 1344 - shape[output_cols].dropna().shape[0]
+    print(f'Filled {1344 - len(shape[shape[output_cols[3]].notna()])} missing intervals from Apr-Jun fallback')
 
 out_path = 'cleaned_data/intraday_shape.csv'
 shape[output_cols].to_csv(out_path, index=False)

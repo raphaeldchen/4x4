@@ -1,29 +1,39 @@
 """
 Forecast interval-level CCT for August 2025.
-Method: August daily CCT (known) × intraday shape ratio (from Apr-Jun 2025).
-CCT is set to 0 for any interval where forecasted CV = 0 (those intervals
-are excluded from scoring entirely, so they should not contribute noise).
+Method: August daily CCT (known) × blended shape ratio.
 
 SHAPE_MODE options:
-  'shaped' — multiply daily CCT by the Apr-Jun intraday shape ratio (original approach)
-  'flat'   — use daily CCT uniformly across all intervals (no shape adjustment)
+  'shaped' — full Apr-Jun intraday shape ratio (scored 20% EC — worse than flat)
+  'flat'   — daily CCT uniformly across all intervals (scored 16.77% EC)
+  'blend'  — weighted mix: α × shape + (1-α) × 1.0
+             α=0 is equivalent to flat, α=1 is equivalent to shaped
+             tune ALPHA between 0 and 1 to find the sweet spot
+
+CCT is set to 0 for any interval where forecasted CV = 0 (excluded from scoring).
 """
 
 import pandas as pd
 
 GROUPS = ['a', 'b', 'c', 'd']
 
-# Toggle between 'shaped' and 'flat' to compare submission scores
-SHAPE_MODE = 'flat'
+SHAPE_MODE = 'blend'
 
-# Upward bias per group to reduce underprediction penalty (Pt).
-# Only applies in 'shaped' mode — in 'flat' mode set all to 1.0 first to isolate the shape effect.
+# Blend weight: how much of the Apr-Jun CCT shape to apply.
+# 0.0 = fully flat (16.77% EC), 1.0 = fully shaped (20.00% EC)
+# Try 0.1, 0.2, 0.3 in sequence to find if any partial shape helps.
+ALPHA = 0.7
+
+# Upward bias per group (applies in all modes).
+# Bias doesn't affect EC (symmetric metric) but helps Pt.
+# Keep at 1.0 until ALPHA is tuned, to isolate the blend effect.
 BIAS = {
-    'shaped': {'A': 1.05, 'B': 1.06, 'C': 1.10, 'D': 1.15},
-    'flat':   {'A': 1.0,  'B': 1.0,  'C': 1.0,  'D': 1.0 },
+    'A': 1.0,
+    'B': 1.0,
+    'C': 1.0,
+    'D': 1.0,
 }
 
-# --- Load shape (only used in 'shaped' mode) ---
+# --- Load shape ---
 
 shape = pd.read_csv('cleaned_data/intraday_shape.csv')[
     ['group', 'day_of_week', 'interval', 'shape_cct']
@@ -42,19 +52,20 @@ for g in GROUPS:
 daily = pd.concat(daily_frames, ignore_index=True)
 daily['day_of_week'] = daily['Date'].dt.day_name()
 
-# --- Join shape onto daily (each daily row fans out to 48 interval rows) ---
+# --- Join shape onto daily ---
 
 forecast = daily.merge(shape, on=['group', 'day_of_week'], how='left')
 
 # --- Compute interval CCT ---
 
-bias = BIAS[SHAPE_MODE]
-
 if SHAPE_MODE == 'shaped':
-    forecast['interval_cct'] = forecast['CCT'] * forecast['shape_cct'] * forecast['group'].map(bias)
+    blended = forecast['shape_cct']
 elif SHAPE_MODE == 'flat':
-    forecast['interval_cct'] = forecast['CCT'] * forecast['group'].map(bias)
+    blended = 1.0
+elif SHAPE_MODE == 'blend':
+    blended = ALPHA * forecast['shape_cct'] + (1 - ALPHA) * 1.0
 
+forecast['interval_cct'] = forecast['CCT'] * blended * forecast['group'].map(BIAS)
 forecast['interval_cct'] = forecast['interval_cct'].clip(lower=0).round(2)
 
 # --- Zero out CCT where CV forecast is zero ---
@@ -80,8 +91,8 @@ validation = (
     )
 )
 validation['ratio'] = (validation['interval_cct_mean'] / validation['daily_cct_mean']).round(4)
-print(f"SHAPE_MODE = '{SHAPE_MODE}'")
-print("Validation — mean interval CCT vs mean daily CCT (ratio should be ~BIAS):")
+print(f"SHAPE_MODE = '{SHAPE_MODE}' | ALPHA = {ALPHA}")
+print("Validation — mean interval CCT vs mean daily CCT:")
 print(validation.round(2).to_string())
 print()
 

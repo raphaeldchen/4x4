@@ -34,7 +34,7 @@ merged = (
 # --- Derive Abandoned Calls ---
 
 merged['abandoned_calls'] = (merged['interval_abd'] * merged['interval_cv']).round().astype(int)
-merged['abandoned_calls'] = merged['abandoned_calls'].clip(lower=0, upper=merged['interval_cv'])
+merged['abandoned_calls'] = merged['abandoned_calls'].clip(lower=0, upper=merged['interval_cv'].astype(int))
 
 # --- Pivot from long to wide (one row per date × interval) ---
 
