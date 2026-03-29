@@ -1,7 +1,14 @@
 """
 Compute intraday shape: for each (group, day_of_week, interval),
-divide interval means by the daily mean for that group/day_of_week.
-Daily means and staffing are computed from April-June 2025 data only.
+divide interval CV by the daily CV for that group/day_of_week.
+
+SHAPE_METHOD options:
+  'ratio_of_means' — original: trimmed_mean(interval_cv) / trimmed_mean(daily_cv)
+  'ratio_of_sums'  — Σ(interval_cv) / Σ(daily_cv) across all training days for that DOW.
+                     Equivalent to a volume-weighted mean of per-day shapes: high-volume
+                     (normal) days dominate; low-volume (holiday-adjacent) days are
+                     naturally down-weighted without needing explicit exclusion.
+                     Only applied to shape_call_volume; CCT/ABD/SL keep ratio_of_means.
 """
 
 import pandas as pd
@@ -10,6 +17,8 @@ GROUPS = ['a', 'b', 'c', 'd']
 
 # Must match SHAPE_MONTHS in agg.py.
 SHAPE_MONTHS = [4, 5, 6]
+
+SHAPE_METHOD = 'ratio_of_sums'  # 'ratio_of_means' = original trimmed-mean approach
 
 # Must match EXCLUDE_DATES in agg.py.
 EXCLUDE_DATES = {
@@ -61,6 +70,61 @@ daily_means = (
     .reset_index()
 )
 
+# --- Step 1b: Ratio-of-sums CV shape (volume-weighted, uses raw interval data) ---
+# Computed here because it reuses the already-filtered `daily` DataFrame.
+# Only affects shape_call_volume; other metrics use ratio_of_means below.
+
+if SHAPE_METHOD == 'ratio_of_sums':
+    # Load raw interval data with the same SHAPE_MONTHS + EXCLUDE_DATES filter.
+    intv_frames = []
+    for group in GROUPS:
+        df = pd.read_csv(f'cleaned_data/{group}_interval_cleaned.csv', encoding='utf-8-sig')
+        df['Date'] = pd.to_datetime(df['Date'], format='%m/%d/%y')
+        df = df[(df['Date'].dt.year == 2025) & df['Date'].dt.month.isin(SHAPE_MONTHS)]
+        df = df[~df['Date'].dt.strftime('%Y-%m-%d').isin(EXCLUDE_DATES)]
+        df['day_of_week'] = df['Date'].dt.day_name()
+        df['group'] = group.upper()
+        intv_frames.append(df[['group', 'day_of_week', 'Interval', 'Call Volume']])
+
+    intervals_raw = pd.concat(intv_frames, ignore_index=True)
+    # Normalize single-digit hours to zero-padded HH:MM (e.g. '9:00' → '09:00')
+    intervals_raw['Interval'] = intervals_raw['Interval'].str.replace(
+        r'^(\d):(\d{2})$', r'0\1:\2', regex=True
+    )
+
+    # Numerator: Σ(interval_cv) per (group, DOW, interval)
+    interval_cv_sums = (
+        intervals_raw.groupby(['group', 'day_of_week', 'Interval'])['Call Volume']
+        .sum()
+        .reset_index()
+        .rename(columns={'Interval': 'interval', 'Call Volume': 'sum_interval_cv'})
+    )
+
+    # Denominator: Σ(interval_cv) across ALL intervals per (group, DOW).
+    # Using the interval data as its own denominator guarantees shape sums to exactly 1.0
+    # per (group, DOW), regardless of any daily↔interval data discrepancies.
+    total_cv_per_dow = (
+        intervals_raw.groupby(['group', 'day_of_week'])['Call Volume']
+        .sum()
+        .rename('total_interval_cv')
+        .reset_index()
+    )
+
+    ros_shape = interval_cv_sums.merge(total_cv_per_dow, on=['group', 'day_of_week'])
+    ros_shape['shape_call_volume_ros'] = ros_shape['sum_interval_cv'] / ros_shape['total_interval_cv']
+
+    # Sanity check: verify shapes sum to 1.0 per (group, DOW)
+    shape_check = (
+        ros_shape.groupby(['group', 'day_of_week'])['shape_call_volume_ros'].sum().round(4)
+    )
+    assert (shape_check == 1.0).all(), f"Shape sums not 1.0: {shape_check[shape_check != 1.0]}"
+    print(
+        f"Ratio-of-sums shape: {len(ros_shape)} cells, "
+        f"mean={ros_shape['shape_call_volume_ros'].mean():.5f}, "
+        f"max={ros_shape['shape_call_volume_ros'].max():.5f}, "
+        f"all DOW sums=1.0 OK"
+    )
+
 # --- Step 2: Load staffing, filter Apr-Jun 2025, compute means by dow per group ---
 
 staffing = pd.read_csv('cleaned_data/daily_staffing_cleaned.csv', encoding='utf-8-sig')
@@ -96,6 +160,17 @@ for interval_col, _ in METRICS:
     short = interval_col.replace('mean_', '')
     daily_col = f'daily_{short}'
     shape[f'shape_{short}'] = shape[interval_col] / shape[daily_col]
+
+# --- Step 4b: Override shape_call_volume with ratio-of-sums if selected ---
+
+if SHAPE_METHOD == 'ratio_of_sums':
+    shape = shape.drop(columns=['shape_call_volume'])
+    shape = shape.merge(
+        ros_shape[['group', 'day_of_week', 'interval', 'shape_call_volume_ros']]
+        .rename(columns={'shape_call_volume_ros': 'shape_call_volume'}),
+        on=['group', 'day_of_week', 'interval'],
+        how='left',
+    )
 
 # --- Step 5: Select and order output columns ---
 
