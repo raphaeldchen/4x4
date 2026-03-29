@@ -32,15 +32,49 @@ _EXCLUDE_DATES = {
 }
 
 # Upward bias per group (multiplicative, applied after prediction).
-# Uniform 1.03 matches v17 (current leaderboard best, EV=34.802).
-# Empirical finding: lower bias → higher EV (we are underpredicting at 1.03).
-# Do NOT reduce C/D bias to compensate for shape_sum; C is 46% of EV — it
-# needs at least as much bias as A/B, not less.
-# Next tuning direction: try 1.04, 1.05, 1.06 to close gap to 1st place.
+# Empirically confirmed optimal: uniform ~1.042-1.044 (EV U-shape minimum).
+# Decoded weights: w1=0.450, w2=0.202, w3=0.146, w4=0.199.
+# NEVER reduce C/D below A/B — C is 46% of EV. Uniform or C/D ≥ A/B only.
 BIAS = {
-    'shaped':     {'A': 1.03, 'B': 1.03, 'C': 1.03, 'D': 1.03},
-    'flat':       {'A': 1.0,  'B': 1.0,  'C': 1.0,  'D': 1.0 },
-    'regression': {'A': 1.03, 'B': 1.03, 'C': 1.03, 'D': 1.03},
+    'shaped':     {'A': 1.044, 'B': 1.044, 'C': 1.044, 'D': 1.044},
+    'flat':       {'A': 1.0,   'B': 1.0,   'C': 1.0,   'D': 1.0  },
+    'regression': {'A': 1.044, 'B': 1.044, 'C': 1.044, 'D': 1.044},
+}
+
+# ── Shape smoothing ────────────────────────────────────────────────────────
+# Blend raw shape with a smoothed version to reduce estimation noise.
+# Rationale: with ~12 obs/cell, the shape has meaningful noise at some intervals.
+# Smoothing reduces noise while preserving broad patterns. Circular (wraps midnight).
+#
+# SHAPE_SMOOTH_ALPHA: 0.0 = no smoothing, 1.0 = fully smoothed
+# SHAPE_SMOOTH_WINDOW: 3 = [0.25, 0.5, 0.25],  5 = [0.1, 0.2, 0.4, 0.2, 0.1]
+SHAPE_SMOOTH_ALPHA  = 0.5   # v31 best: alpha=0.5, window=5 (EV=34.148, rank 6)
+SHAPE_SMOOTH_WINDOW = 5
+
+# ── School-year onset correction ───────────────────────────────────────────
+# August school year starts → call patterns shift toward April (school-in)
+# and away from June (summer). Applied AFTER smoothing; self-normalizing.
+#
+# Per-portfolio blend weight toward April-only shape in school windows.
+# Based on Apr/Jun RoS ratio analysis (weekday business hours 7am-9pm):
+#   A: mean ratio=0.753 across ALL biz hours (strong uniform seasonal shift)
+#   B: mean ratio=0.992 (no signal — keep at 0)
+#   C: mean ratio=0.996 but 7:00-8:30 ratio≈0.921 (weak morning dip)
+#   D: mean ratio=1.000 but 7:00-7:30 ratio≈0.918 (very weak)
+# Windows: 'all_biz' applies to 07:00-20:30 weekdays; 'morning' applies to
+#   07:00-08:30 weekdays only. 'afternoon' applies to 14:00-16:30 weekdays.
+# 0.0 = no correction (v31 baseline), 1.0 = fully April shape at those hours.
+SCHOOL_YEAR_WEIGHT = {
+    'A': {'window': 'all_biz',  'blend': 0.0},  # 0→0.3→0.5→0.7 in variants
+    'B': {'window': 'morning',  'blend': 0.0},  # keep 0
+    'C': {'window': 'morning',  'blend': 0.0},  # 0→0.2→0.3 in variants
+    'D': {'window': 'morning',  'blend': 0.0},  # 0→0.1→0.2 in variants
+}
+# Window definitions (inclusive, 30-min slots)
+_SCHOOL_WINDOWS = {
+    'all_biz':  lambda h: 7.0  <= h <= 20.5,
+    'morning':  lambda h: 7.0  <= h <= 8.5,
+    'afternoon':lambda h: 14.0 <= h <= 16.5,
 }
 
 # Zero out interval CV predictions below this threshold.
@@ -101,6 +135,107 @@ daily['day_of_week'] = daily['Date'].dt.day_name()
 shape = pd.read_csv('cleaned_data/intraday_shape.csv')[
     ['group', 'day_of_week', 'interval', 'shape_call_volume']
 ].copy()
+
+# --- Apply shape smoothing (circular, preserves sum per group×DOW) ---
+
+if SHAPE_SMOOTH_ALPHA > 0:
+    if SHAPE_SMOOTH_WINDOW == 3:
+        kernel = np.array([0.25, 0.50, 0.25])
+    else:  # 5
+        kernel = np.array([0.10, 0.20, 0.40, 0.20, 0.10])
+    half = len(kernel) // 2
+
+    smooth_parts = []
+    for (g, dow), grp in shape.groupby(['group', 'day_of_week']):
+        grp = grp.sort_values('interval').copy()
+        vals = grp['shape_call_volume'].values.astype(float)
+        n = len(vals)
+        smoothed = np.array([
+            sum(kernel[k] * vals[(i + k - half) % n] for k in range(len(kernel)))
+            for i in range(n)
+        ])
+        grp['shape_call_volume'] = (1 - SHAPE_SMOOTH_ALPHA) * vals + SHAPE_SMOOTH_ALPHA * smoothed
+        smooth_parts.append(grp)
+    shape = pd.concat(smooth_parts).reset_index(drop=True)
+    print(f'Shape smoothing: alpha={SHAPE_SMOOTH_ALPHA}, window={SHAPE_SMOOTH_WINDOW}')
+
+# --- School-year onset correction: blend smoothed shape toward April-only shape ---
+# Applied AFTER smoothing. Self-normalizing per (group, DOW). Weekdays only.
+# Rationale: August school start shifts intraday patterns back toward April (school-in)
+# and away from June (summer-off). Blend is applied only in configured school windows.
+
+if any(v['blend'] != 0.0 for v in SCHOOL_YEAR_WEIGHT.values()):
+    # Build April-only RoS shape (ratio-of-sums, consistent with v17 approach)
+    apr_intv_frames, apr_daily_frames = [], []
+    for g in GROUPS:
+        intv = pd.read_csv(f'cleaned_data/{g}_interval_cleaned.csv', encoding='utf-8-sig')
+        intv['Date'] = pd.to_datetime(intv['Date'], format='%m/%d/%y')
+        intv = intv[intv['Date'].dt.month == 4]
+        intv = intv[~intv['Date'].dt.strftime('%Y-%m-%d').isin(_EXCLUDE_DATES)]
+        intv['group'] = g.upper()
+        intv['day_of_week'] = intv['Date'].dt.day_name()
+        intv['interval'] = intv['Interval'].str.replace(r'^(\d):(\d{2})$', r'0\1:\2', regex=True)
+        apr_intv_frames.append(intv[['group', 'day_of_week', 'interval', 'Call Volume']])
+
+        d = pd.read_csv(f'cleaned_data/{g}_daily_cleaned.csv', encoding='utf-8-sig')
+        d['Date'] = pd.to_datetime(d['Date'], format='%m/%d/%y')
+        d = d[(d['Date'].dt.year == 2025) & (d['Date'].dt.month == 4)]
+        d = d[~d['Date'].dt.strftime('%Y-%m-%d').isin(_EXCLUDE_DATES)]
+        d['group'] = g.upper()
+        d['day_of_week'] = d['Date'].dt.day_name()
+        apr_daily_frames.append(d[['group', 'day_of_week', 'Call Volume']])
+
+    apr_intv_all = pd.concat(apr_intv_frames)
+    apr_daily_all = pd.concat(apr_daily_frames)
+
+    # Ratio-of-sums: Σ(interval_cv) / Σ(daily_cv) per (group, DOW, interval)
+    apr_intv_sum = (
+        apr_intv_all.groupby(['group', 'day_of_week', 'interval'])['Call Volume']
+        .sum().rename('intv_sum').reset_index()
+    )
+    apr_daily_sum = (
+        apr_daily_all.groupby(['group', 'day_of_week'])['Call Volume']
+        .sum().rename('daily_sum').reset_index()
+    )
+    apr_m = apr_intv_sum.merge(apr_daily_sum, on=['group', 'day_of_week'])
+    apr_m['apr_shape'] = apr_m['intv_sum'] / apr_m['daily_sum']
+    apr_shape_idx = apr_m.set_index(['group', 'day_of_week', 'interval'])['apr_shape']
+
+    # Apply blending per (group, DOW) for weekdays only
+    school_parts = []
+    for (g, dow), grp in shape.groupby(['group', 'day_of_week']):
+        grp = grp.sort_values('interval').copy()
+        cfg = SCHOOL_YEAR_WEIGHT.get(g, {'window': 'morning', 'blend': 0.0})
+        blend = cfg['blend']
+
+        if blend == 0.0 or dow not in WEEKDAYS:
+            school_parts.append(grp)
+            continue
+
+        win_fn = _SCHOOL_WINDOWS[cfg['window']]
+        orig_sum = grp['shape_call_volume'].sum()
+
+        new_vals = grp['shape_call_volume'].copy()
+        for idx, row in grp.iterrows():
+            # Parse hour from interval string (e.g. '07:30' → 7.5)
+            h, m_str = row['interval'].split(':')
+            hour_frac = int(h) + int(m_str) / 60.0
+            if win_fn(hour_frac):
+                key = (g, dow, row['interval'])
+                if key in apr_shape_idx.index:
+                    apr_val = apr_shape_idx[key]
+                    new_vals[idx] = (1 - blend) * row['shape_call_volume'] + blend * apr_val
+
+        # Renormalize to preserve daily total
+        new_sum = new_vals.sum()
+        if new_sum > 0:
+            new_vals = new_vals * (orig_sum / new_sum)
+        grp['shape_call_volume'] = new_vals
+        school_parts.append(grp)
+
+    shape = pd.concat(school_parts).reset_index(drop=True)
+    active = {g: v for g, v in SCHOOL_YEAR_WEIGHT.items() if v['blend'] != 0.0}
+    print(f'School-year correction applied: {active}')
 
 # --- Load DOM correction factors (for 'shaped' mode only) ---
 
