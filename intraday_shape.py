@@ -17,6 +17,8 @@ EXCLUDE_DATES = {
     '2025-04-20',  # Easter Sunday
     '2025-05-11',  # Mother's Day
     '2025-05-26',  # Memorial Day
+    '2025-06-15',  # Father's Day     — 5-12% below normal Sunday
+    '2025-06-19',  # Juneteenth       — 6-9% below normal Thursday
 }
 
 METRICS = [

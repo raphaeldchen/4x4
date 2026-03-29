@@ -22,6 +22,28 @@ BIAS = {
 # Zero out interval CV predictions below this threshold.
 OVERNIGHT_ZERO_THRESHOLD = 0
 
+# ── Seasonal / DOW adjustment (Fix 1 + Fix 3) ──────────────────────────────
+# Apply a per-(group, DOW) scaling factor that corrects for the mismatch
+# between the Apr-Jun training shape and August intraday behaviour.
+#
+# adj[g, dow] = Aug2024_meanCV(g, dow) / AprJun2025_meanCV(g, dow)
+#
+# This captures:
+#   Fix 1 — month-of-year level: how August volume compares to Q2 volume
+#   Fix 3 — DOW-specific intensity: how each DOW's relative weight shifts in Aug
+#
+# Both adjustments use the same formula; they are applied once as a combined
+# multiplier so we do not double-count.
+APPLY_SEASONAL_ADJ = False
+
+# Holidays to exclude when computing AprJun2025 daily means (matches agg.py)
+SEASONAL_ADJ_EXCLUDE = {
+    '2025-04-18',  # Good Friday
+    '2025-04-20',  # Easter Sunday
+    '2025-05-11',  # Mother's Day
+    '2025-05-26',  # Memorial Day
+}
+
 # --- Load August 2025 daily CV for each group ---
 
 daily_frames = []
@@ -42,6 +64,75 @@ shape = pd.read_csv('cleaned_data/intraday_shape.csv')[
 ]
 
 bias = BIAS[SHAPE_MODE]
+
+# ── Compute seasonal adjustment factors ────────────────────────────────────
+if APPLY_SEASONAL_ADJ:
+    adj_frames = []
+    for g in GROUPS:
+        df_all = pd.read_csv(f'cleaned_data/{g}_daily_cleaned.csv', encoding='utf-8-sig')
+        df_all['Date'] = pd.to_datetime(df_all['Date'], format='%m/%d/%y')
+        df_all['day_of_week'] = df_all['Date'].dt.day_name()
+
+        # Aug 2024 — no major US holidays in August
+        aug2024 = df_all[(df_all['Date'].dt.year == 2024) & (df_all['Date'].dt.month == 8)]
+        aug2024_mean = aug2024.groupby('day_of_week')['Call Volume'].mean().rename('aug2024_cv')
+
+        # Apr-Jun 2025 — exclude same holidays used when building the shape
+        aprjun = df_all[
+            (df_all['Date'].dt.year == 2025) &
+            df_all['Date'].dt.month.isin([4, 5, 6])
+        ]
+        aprjun = aprjun[~aprjun['Date'].dt.strftime('%Y-%m-%d').isin(SEASONAL_ADJ_EXCLUDE)]
+        aprjun_mean = aprjun.groupby('day_of_week')['Call Volume'].mean().rename('aprjun_cv')
+
+        adj = pd.concat([aug2024_mean, aprjun_mean], axis=1).reset_index()
+        adj.columns = ['day_of_week', 'aug2024_cv', 'aprjun_cv']
+        adj['seasonal_adj'] = adj['aug2024_cv'] / adj['aprjun_cv']
+        adj['group'] = g.upper()
+        adj_frames.append(adj[['group', 'day_of_week', 'seasonal_adj']])
+
+    seasonal_adj = pd.concat(adj_frames, ignore_index=True)
+
+    # Normalize so the weighted-average adj across August 2025 DOWs = 1.0 per group.
+    # This redistributes volume across DOWs (some heavier, some lighter in Aug vs Q2)
+    # without inflating the total — prevents compounding with BIAS.
+    aug_dow_counts = (
+        daily[['group', 'day_of_week']]
+        .value_counts()
+        .reset_index(name='count')
+    )
+    seasonal_adj = seasonal_adj.merge(aug_dow_counts, on=['group', 'day_of_week'], how='left')
+    seasonal_adj['count'] = seasonal_adj['count'].fillna(1)
+    seasonal_adj['_weighted'] = seasonal_adj['seasonal_adj'] * seasonal_adj['count']
+    grp_avg = (
+        seasonal_adj
+        .groupby('group')[['_weighted', 'count']]
+        .sum()
+        .assign(avg_adj=lambda x: x['_weighted'] / x['count'])
+        [['avg_adj']]
+        .reset_index()
+    )
+    seasonal_adj = seasonal_adj.drop(columns=['_weighted'])
+    seasonal_adj = seasonal_adj.merge(grp_avg, on='group')
+    seasonal_adj['seasonal_adj'] = seasonal_adj['seasonal_adj'] / seasonal_adj['avg_adj']
+    seasonal_adj = seasonal_adj[['group', 'day_of_week', 'seasonal_adj']]
+
+    print("Raw seasonal adjustment factors (Aug2024 / AprJun2025):")
+    day_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+
+    # Rebuild for display: recompute raw before normalization
+    raw_display = pd.concat(adj_frames, ignore_index=True)
+    pivot_raw = raw_display.pivot_table(values='seasonal_adj', index='group', columns='day_of_week')
+    pivot_raw = pivot_raw[[c for c in day_order if c in pivot_raw.columns]]
+    print(pivot_raw.round(3).to_string())
+
+    print("\nNormalized seasonal adjustment factors (volume-neutral DOW redistribution):")
+    pivot_norm = seasonal_adj.pivot_table(values='seasonal_adj', index='group', columns='day_of_week')
+    pivot_norm = pivot_norm[[c for c in day_order if c in pivot_norm.columns]]
+    print(pivot_norm.round(3).to_string())
+    print()
+else:
+    seasonal_adj = None
 
 # ============================================================
 # REGRESSION MODE
@@ -114,9 +205,16 @@ if SHAPE_MODE == 'regression':
 
 elif SHAPE_MODE == 'shaped':
     forecast = daily.merge(shape, on=['group', 'day_of_week'], how='left')
-    forecast['interval_cv'] = (
-        forecast['Call Volume'] * forecast['shape_call_volume'] * forecast['group'].map(bias)
-    )
+    if APPLY_SEASONAL_ADJ and seasonal_adj is not None:
+        forecast = forecast.merge(seasonal_adj, on=['group', 'day_of_week'], how='left')
+        forecast['interval_cv'] = (
+            forecast['Call Volume'] * forecast['shape_call_volume'] *
+            forecast['seasonal_adj'] * forecast['group'].map(bias)
+        )
+    else:
+        forecast['interval_cv'] = (
+            forecast['Call Volume'] * forecast['shape_call_volume'] * forecast['group'].map(bias)
+        )
     forecast['interval_cv'] = forecast['interval_cv'].clip(lower=0).round().astype(int)
 
 elif SHAPE_MODE == 'flat':

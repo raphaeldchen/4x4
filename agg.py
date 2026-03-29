@@ -11,9 +11,7 @@ GROUPS = ['a', 'b', 'c', 'd']
 SHAPE_MONTHS = [4, 5, 6]
 
 # Weight multiplier for the most recent month vs earlier months.
-# e.g. RECENCY_WEIGHT = 1 repeats the most recent month's observations 2×,
-# giving it twice the influence on the shape means.
-# Set to 1 for equal weighting.
+# Set to 1 for equal weighting (best empirically — June-heavy shapes hurt EV).
 RECENCY_WEIGHT = 1
 
 # Dates to exclude from the shape calculation (YYYY-MM-DD).
@@ -25,6 +23,8 @@ EXCLUDE_DATES = {
     '2025-04-20',  # Easter Sunday     — 40-55% below normal Sunday; morning-shifted shape
     '2025-05-11',  # Mother's Day      — 14-23% below normal Sunday
     '2025-05-26',  # Memorial Day      — 43-51% below normal Monday
+    '2025-06-15',  # Father's Day      — 5-12% below normal Sunday (Groups C, D)
+    '2025-06-19',  # Juneteenth        — 6-9% below normal Thursday (Groups A, C, D)
 }
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
