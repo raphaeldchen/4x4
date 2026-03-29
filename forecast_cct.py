@@ -2,32 +2,38 @@
 Forecast interval-level CCT for August 2025.
 
 SHAPE_MODE options:
-  'shaped'       — daily_cct_aug × shape_ratio  (shape_ratio = apr-jun_interval / apr-jun_daily)
-                   scored 20% EC — worse than flat
-  'flat'         — daily_cct_aug uniformly across all intervals (scored 16.77% EC)
-  'blend'        — daily_cct_aug × (α × shape_ratio + (1-α) × 1.0)
-                   α=0 = flat, α=1 = shaped. Monotonically improving up to α=0.7 (15.56% EC).
+  'shaped'       — daily_cct_aug × shape_ratio  (scored 20% EC — worse than flat)
+  'flat'         — daily_cct_aug uniformly (16.77% EC)
+  'blend'        — daily_cct_aug × (α × shape_ratio + (1-α) × 1.0)  (best: α=0.7, 15.56%)
   'direct_blend' — α × interval_cct_aprjun + (1-α) × daily_cct_aug
-                   Analogous to ABD direct_blend: blends observed Apr-Jun interval CCT with
-                   August daily CCT directly, avoiding ratio amplification when Aug daily
-                   CCT differs from Apr-Jun daily CCT.
+                   α=0.9 → 14.40% EC (best overall)
+  'additive'     — interval_cct_aprjun + α × (daily_cct_aug_date - daily_cct_aprjun_dow)
+                   Did NOT improve — additive level shift hurts noisy overnight slots.
+  'cv_gated'     — hybrid: direct_blend (ALPHA) when interval CV >= CV_THRESHOLD,
+                   flat daily CCT when CV < CV_THRESHOLD.
+                   Rationale: overnight CCT cv=0.87 (pure noise); business-hours CCT cv=0.10
+                   (stable signal). Apr-Jun interval means for low-CV overnight slots are
+                   unreliable — flat daily is a better estimate for those.
 
-CCT is set to 0 for any interval where forecasted CV = 0 (excluded from scoring).
+CCT is set to 0 for intervals where forecasted CV = 0 (excluded from scoring).
 """
 
 import pandas as pd
 
 GROUPS = ['a', 'b', 'c', 'd']
 
-SHAPE_MODE = 'direct_blend'
+SHAPE_MODE = 'cv_gated'
 
-# For blend: how much of the Apr-Jun CCT shape ratio to apply.
-# For direct_blend: weight on Apr-Jun observed interval CCT vs August daily CCT.
-# blend α=0.7 scored 15.56% EC (best so far); try 0.9 and 1.0 next.
-ALPHA = 1.0
+# For direct_blend and cv_gated: weight on Apr-Jun interval CCT vs August daily CCT.
+# Best so far: 0.9 (14.40% EC). Do not increase above 1.0.
+ALPHA = 0.9
 
-# Upward bias per group (applies in all modes).
-# Bias doesn't affect EC (symmetric metric) but helps Pt.
+# cv_gated only: intervals with CV_pred < this threshold use flat daily CCT.
+# Hours 2-6 have mean CV 3-14 — high noise zone. Threshold of 10 captures most of that.
+# Try 10 first, then 15 or 5 if no improvement.
+CV_THRESHOLD = 15
+
+# Upward bias per group — helps Pt but not EC (symmetric).
 BIAS = {
     'A': 1.0,
     'B': 1.0,
@@ -38,7 +44,7 @@ BIAS = {
 # --- Load shape ---
 
 shape = pd.read_csv('cleaned_data/intraday_shape.csv')[
-    ['group', 'day_of_week', 'interval', 'shape_cct', 'interval_cct']
+    ['group', 'day_of_week', 'interval', 'shape_cct', 'interval_cct', 'daily_cct']
 ]
 
 # --- Load August 2025 daily CCT for each group ---
@@ -58,58 +64,78 @@ daily['day_of_week'] = daily['Date'].dt.day_name()
 
 forecast = daily.merge(shape, on=['group', 'day_of_week'], how='left')
 
-# --- Compute interval CCT ---
-
-if SHAPE_MODE == 'shaped':
-    blended = forecast['shape_cct']
-elif SHAPE_MODE == 'flat':
-    blended = 1.0
-elif SHAPE_MODE == 'blend':
-    blended = ALPHA * forecast['shape_cct'] + (1 - ALPHA) * 1.0
-
-if SHAPE_MODE in ('shaped', 'flat', 'blend'):
-    forecast['interval_cct'] = forecast['CCT'] * blended * forecast['group'].map(BIAS)
-elif SHAPE_MODE == 'direct_blend':
-    forecast['interval_cct'] = (
-        ALPHA * forecast['interval_cct'] +
-        (1 - ALPHA) * forecast['CCT']
-    ) * forecast['group'].map(BIAS)
-
-forecast['interval_cct'] = forecast['interval_cct'].clip(lower=0).round(2)
-
-# --- Zero out CCT where CV forecast is zero ---
+# --- Load CV forecast for cv_gated mode ---
 
 cv = pd.read_csv('forecasts/cv_forecast.csv')
 cv['Date'] = pd.to_datetime(cv['Date'])
-
 forecast = forecast.merge(
     cv[['group', 'Date', 'interval', 'interval_cv']],
     on=['group', 'Date', 'interval'],
     how='left'
 )
-forecast.loc[forecast['interval_cv'] == 0, 'interval_cct'] = 0
+
+# --- Compute interval CCT ---
+
+if SHAPE_MODE == 'shaped':
+    forecast['interval_cct_pred'] = forecast['CCT'] * forecast['shape_cct']
+
+elif SHAPE_MODE == 'flat':
+    forecast['interval_cct_pred'] = forecast['CCT']
+
+elif SHAPE_MODE == 'blend':
+    blended = ALPHA * forecast['shape_cct'] + (1 - ALPHA) * 1.0
+    forecast['interval_cct_pred'] = forecast['CCT'] * blended
+
+elif SHAPE_MODE == 'direct_blend':
+    forecast['interval_cct_pred'] = (
+        ALPHA * forecast['interval_cct'] + (1 - ALPHA) * forecast['CCT']
+    )
+
+elif SHAPE_MODE == 'additive':
+    level_correction = forecast['CCT'] - forecast['daily_cct']
+    forecast['interval_cct_pred'] = forecast['interval_cct'] + ALPHA * level_correction
+
+elif SHAPE_MODE == 'cv_gated':
+    # High-CV intervals: direct_blend (reliable Apr-Jun shape signal)
+    # Low-CV overnight intervals: flat daily CCT (Apr-Jun mean is noise-dominated)
+    high_cv = forecast['interval_cv'] >= CV_THRESHOLD
+    forecast['interval_cct_pred'] = forecast['CCT'].copy()  # default: flat
+    forecast.loc[high_cv, 'interval_cct_pred'] = (
+        ALPHA * forecast.loc[high_cv, 'interval_cct'] +
+        (1 - ALPHA) * forecast.loc[high_cv, 'CCT']
+    )
+
+forecast['interval_cct_pred'] = (
+    forecast['interval_cct_pred'] * forecast['group'].map(BIAS)
+).clip(lower=0).round(2)
+
+# --- Zero out CCT where CV = 0 ---
+
+forecast.loc[forecast['interval_cv'] == 0, 'interval_cct_pred'] = 0
 
 # --- Validate ---
 
+n_gated = (forecast['interval_cv'] < CV_THRESHOLD).sum() if SHAPE_MODE == 'cv_gated' else 0
 validation = (
     forecast
     .groupby('group')
     .agg(
-        daily_cct_mean=('CCT', 'mean'),
-        interval_cct_mean=('interval_cct', 'mean'),
+        aug_daily_mean=('CCT', 'mean'),
+        interval_cct_pred_mean=('interval_cct_pred', 'mean'),
     )
 )
-validation['ratio'] = (validation['interval_cct_mean'] / validation['daily_cct_mean']).round(4)
-print(f"SHAPE_MODE = '{SHAPE_MODE}' | ALPHA = {ALPHA}")
-print("Validation — mean interval CCT vs mean daily CCT:")
+validation['ratio'] = (validation['interval_cct_pred_mean'] / validation['aug_daily_mean']).round(4)
+print(f"SHAPE_MODE = '{SHAPE_MODE}' | ALPHA = {ALPHA}" +
+      (f" | CV_THRESHOLD = {CV_THRESHOLD} ({n_gated} intervals use flat)" if SHAPE_MODE == 'cv_gated' else ""))
+print("Validation — mean interval CCT vs Aug daily CCT:")
 print(validation.round(2).to_string())
 print()
 
 # --- Output ---
 
-out = forecast[['group', 'Date', 'day_of_week', 'interval', 'interval_cct']].sort_values(
-    ['group', 'Date', 'interval']
-).reset_index(drop=True)
+out = forecast[['group', 'Date', 'day_of_week', 'interval', 'interval_cct_pred']].rename(
+    columns={'interval_cct_pred': 'interval_cct'}
+).sort_values(['group', 'Date', 'interval']).reset_index(drop=True)
 
 out_path = 'forecasts/cct_forecast.csv'
 out.to_csv(out_path, index=False)
