@@ -11,6 +11,19 @@ GROUPS = ['a', 'b', 'c', 'd']
 #                In-sample vs shaped: 5.01% EV-like vs 5.26% (~4.7% MAE improvement)
 SHAPE_MODE = 'shaped'
 
+# Per-month blend weights for the intraday shape (Apr, May, Jun).
+# Set to None to use the prebuilt intraday_shape.csv (trimmed mean of all 3 months).
+# Otherwise, specify weights that sum to 1.0 — June gets the most weight since it's
+# closest to August seasonally.
+# Examples:
+#   (0.2, 0.3, 0.5)  — user-proposed blend
+#   (0.0, 0.0, 1.0)  — June only
+#   None             — use prebuilt shape (trimmed mean Apr-Jun, current baseline)
+SHAPE_MONTH_WEIGHTS = None
+
+# Dates excluded from shape (same as agg.py / intraday_shape.py)
+_EXCLUDE_DATES = {'2025-04-18', '2025-04-20', '2025-05-11', '2025-05-26'}
+
 # Upward bias per group (multiplicative, applied after prediction).
 # Reduces underprediction penalty Pt. Tune after confirming base approach.
 BIAS = {
@@ -61,7 +74,139 @@ daily['day_of_week'] = daily['Date'].dt.day_name()
 
 shape = pd.read_csv('cleaned_data/intraday_shape.csv')[
     ['group', 'day_of_week', 'interval', 'shape_call_volume']
-]
+].copy()
+
+# --- Load DOM correction factors (for 'shaped' mode only) ---
+
+if DOM_CORRECTION_WEIGHT > 0 and SHAPE_MODE == 'shaped':
+    _dom_raw = pd.read_csv('cleaned_data/intraday_shape_dom_bucket.csv')
+    _dom_raw = _dom_raw[_dom_raw['n_obs'] >= DOM_MIN_OBS][
+        ['group', 'dom_bucket', 'interval', 'dom_correction']
+    ]
+    shape_dom = _dom_raw.copy()
+    print(f'DOM bucket correction loaded: {len(shape_dom)} cells with n_obs >= {DOM_MIN_OBS}')
+    print(f'DOM correction weight: {DOM_CORRECTION_WEIGHT}')
+    print(shape_dom.groupby('dom_bucket')['dom_correction'].describe().round(4).to_string())
+else:
+    shape_dom = None
+
+# --- Per-month blend: replace shape_call_volume with weighted blend of monthly shapes ---
+
+if SHAPE_MONTH_WEIGHTS is not None:
+    w_apr, w_may, w_jun = SHAPE_MONTH_WEIGHTS
+    assert abs(w_apr + w_may + w_jun - 1.0) < 1e-6, "SHAPE_MONTH_WEIGHTS must sum to 1.0"
+
+    month_shapes = {}
+    for month, weight in zip([4, 5, 6], [w_apr, w_may, w_jun]):
+        if weight == 0.0:
+            continue
+        intv_frames, daily_frames_shape = [], []
+        for g in GROUPS:
+            intv = pd.read_csv(f'cleaned_data/{g}_interval_cleaned.csv', encoding='utf-8-sig')
+            intv['Date'] = pd.to_datetime(intv['Date'], format='%m/%d/%y')
+            intv = intv[intv['Date'].dt.month == month]
+            intv = intv[~intv['Date'].dt.strftime('%Y-%m-%d').isin(_EXCLUDE_DATES)]
+            intv['group'] = g.upper()
+            intv['day_of_week'] = intv['Date'].dt.day_name()
+            intv['interval'] = intv['Interval'].str.replace(r'^(\d):(\d{2})$', r'0\1:\2', regex=True)
+            intv_frames.append(intv[['group', 'day_of_week', 'interval', 'Call Volume']])
+
+            d = pd.read_csv(f'cleaned_data/{g}_daily_cleaned.csv', encoding='utf-8-sig')
+            d['Date'] = pd.to_datetime(d['Date'], format='%m/%d/%y')
+            d = d[(d['Date'].dt.year == 2025) & (d['Date'].dt.month == month)]
+            d = d[~d['Date'].dt.strftime('%Y-%m-%d').isin(_EXCLUDE_DATES)]
+            d['group'] = g.upper()
+            d['day_of_week'] = d['Date'].dt.day_name()
+            daily_frames_shape.append(d[['group', 'day_of_week', 'Call Volume']])
+
+        intv_all = pd.concat(intv_frames)
+        daily_all = pd.concat(daily_frames_shape)
+
+        intv_mean = (
+            intv_all.groupby(['group', 'day_of_week', 'interval'])['Call Volume']
+            .mean().rename('interval_mean').reset_index()
+        )
+        daily_mean = (
+            daily_all.groupby(['group', 'day_of_week'])['Call Volume']
+            .mean().rename('daily_mean').reset_index()
+        )
+        m = intv_mean.merge(daily_mean, on=['group', 'day_of_week'])
+        m['shape'] = m['interval_mean'] / m['daily_mean']
+        month_shapes[month] = m.set_index(['group', 'day_of_week', 'interval'])['shape']
+
+    # Build blended shape
+    blended = None
+    for month, weight in zip([4, 5, 6], [w_apr, w_may, w_jun]):
+        if weight == 0.0:
+            continue
+        contrib = month_shapes[month] * weight
+        blended = contrib if blended is None else blended.add(contrib, fill_value=0)
+    blended = blended.rename('shape_call_volume').reset_index()
+
+    shape = shape[['group', 'day_of_week', 'interval']].merge(
+        blended, on=['group', 'day_of_week', 'interval'], how='left'
+    )
+    # Fall back to prebuilt shape for any missing cells
+    prebuilt = pd.read_csv('cleaned_data/intraday_shape.csv')[
+        ['group', 'day_of_week', 'interval', 'shape_call_volume']
+    ].rename(columns={'shape_call_volume': 'shape_fallback'})
+    shape = shape.merge(prebuilt, on=['group', 'day_of_week', 'interval'], how='left')
+    shape['shape_call_volume'] = shape['shape_call_volume'].fillna(shape['shape_fallback'])
+    shape = shape.drop(columns=['shape_fallback'])
+
+    print(f'Per-month blend applied: Apr={w_apr}, May={w_may}, Jun={w_jun}')
+
+# --- Morning boost: weekday vs weekend differentiated, renormalize to preserve daily total ---
+all_boost_vals = list(MORNING_BOOST_WEEKDAY.values()) + list(MORNING_BOOST_WEEKEND.values())
+if any(v != 1.0 for v in all_boost_vals):
+    orig_sums = (
+        shape.groupby(['group', 'day_of_week'])['shape_call_volume']
+        .sum().rename('orig_sum').reset_index()
+    )
+    for grp in ['A', 'B', 'C', 'D']:
+        wd_factor = MORNING_BOOST_WEEKDAY[grp]
+        we_factor = MORNING_BOOST_WEEKEND[grp]
+        wd_mask = (shape['group'].eq(grp) & shape['interval'].isin(MORNING_INTERVALS)
+                   & shape['day_of_week'].isin(WEEKDAYS))
+        we_mask = (shape['group'].eq(grp) & shape['interval'].isin(MORNING_INTERVALS)
+                   & ~shape['day_of_week'].isin(WEEKDAYS))
+        if wd_factor != 1.0:
+            shape.loc[wd_mask, 'shape_call_volume'] *= wd_factor
+        if we_factor != 1.0:
+            shape.loc[we_mask, 'shape_call_volume'] *= we_factor
+    new_sums = (
+        shape.groupby(['group', 'day_of_week'])['shape_call_volume']
+        .sum().rename('new_sum').reset_index()
+    )
+    shape = shape.merge(orig_sums, on=['group', 'day_of_week'])
+    shape = shape.merge(new_sums,  on=['group', 'day_of_week'])
+    shape['shape_call_volume'] = shape['shape_call_volume'] * shape['orig_sum'] / shape['new_sum']
+    shape = shape.drop(columns=['orig_sum', 'new_sum'])
+    print(f'Morning boost applied (weekday/weekend) for {sorted(MORNING_INTERVALS)}')
+    print(f'  Weekday: {MORNING_BOOST_WEEKDAY}')
+    print(f'  Weekend: {MORNING_BOOST_WEEKEND}')
+
+# --- Afternoon boost: back-to-school secondary peak 15:00-16:30, weekdays only ---
+if any(v != 1.0 for v in AFTERNOON_BOOST_WEEKDAY.values()):
+    orig_sums = (
+        shape.groupby(['group', 'day_of_week'])['shape_call_volume']
+        .sum().rename('orig_sum').reset_index()
+    )
+    for grp in ['A', 'B', 'C', 'D']:
+        factor = AFTERNOON_BOOST_WEEKDAY[grp]
+        if factor != 1.0:
+            mask = (shape['group'].eq(grp) & shape['interval'].isin(AFTERNOON_INTERVALS)
+                    & shape['day_of_week'].isin(WEEKDAYS))
+            shape.loc[mask, 'shape_call_volume'] *= factor
+    new_sums = (
+        shape.groupby(['group', 'day_of_week'])['shape_call_volume']
+        .sum().rename('new_sum').reset_index()
+    )
+    shape = shape.merge(orig_sums, on=['group', 'day_of_week'])
+    shape = shape.merge(new_sums,  on=['group', 'day_of_week'])
+    shape['shape_call_volume'] = shape['shape_call_volume'] * shape['orig_sum'] / shape['new_sum']
+    shape = shape.drop(columns=['orig_sum', 'new_sum'])
+    print(f'Afternoon boost applied (weekday) for {sorted(AFTERNOON_INTERVALS)}: {AFTERNOON_BOOST_WEEKDAY}')
 
 bias = BIAS[SHAPE_MODE]
 
