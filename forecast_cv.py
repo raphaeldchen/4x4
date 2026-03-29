@@ -21,15 +21,33 @@ SHAPE_MODE = 'shaped'
 #   None             — use prebuilt shape (trimmed mean Apr-Jun, current baseline)
 SHAPE_MONTH_WEIGHTS = None
 
-# Dates excluded from shape (same as agg.py / intraday_shape.py)
-_EXCLUDE_DATES = {'2025-04-18', '2025-04-20', '2025-05-11', '2025-05-26'}
+# Dates excluded from shape (must match EXCLUDE_DATES in agg.py / intraday_shape.py)
+_EXCLUDE_DATES = {
+    '2025-04-18',  # Good Friday
+    '2025-04-20',  # Easter Sunday
+    '2025-05-11',  # Mother's Day
+    '2025-05-26',  # Memorial Day
+    '2025-06-15',  # Father's Day
+    '2025-06-19',  # Juneteenth
+}
 
 # Upward bias per group (multiplicative, applied after prediction).
-# Reduces underprediction penalty Pt. Tune after confirming base approach.
+# Calibrated per-portfolio so every group achieves the same effective overshoot
+# above its actual daily total, regardless of each portfolio's shape_sum.
+#
+# shape_sum is the sum of shape_call_volume across 48 intervals for a given (group, DOW).
+# C and D have shape_sum slightly > 1.0 (interval data slightly overcounts daily),
+# so they need less additional bias than A and B to hit the same target overshoot.
+#
+# Aug-weighted effective shape sums: A=0.9962, B=0.9969, C=1.0014, D=1.0014
+# At bias=1.03:  A=+2.4%, B=+2.4%, C=+3.2%, D=+3.3%  ← C/D were over-biased
+# At values below: all portfolios target +2.5% overshoot above daily totals.
+# Rationale for +2.5%: small Pt cushion without inflating EV unnecessarily.
+# C carries 46% of the EV denominator; its bias accuracy matters most.
 BIAS = {
-    'shaped':     {'A': 1.03, 'B': 1.03, 'C': 1.03, 'D': 1.03},
-    'flat':       {'A': 1.0,  'B': 1.0,  'C': 1.0,  'D': 1.0 },
-    'regression': {'A': 1.03, 'B': 1.03, 'C': 1.03, 'D': 1.03},
+    'shaped':     {'A': 1.029, 'B': 1.028, 'C': 1.024, 'D': 1.024},
+    'flat':       {'A': 1.0,   'B': 1.0,   'C': 1.0,   'D': 1.0  },
+    'regression': {'A': 1.029, 'B': 1.028, 'C': 1.024, 'D': 1.024},
 }
 
 # Zero out interval CV predictions below this threshold.
@@ -55,7 +73,22 @@ SEASONAL_ADJ_EXCLUDE = {
     '2025-04-20',  # Easter Sunday
     '2025-05-11',  # Mother's Day
     '2025-05-26',  # Memorial Day
+    '2025-06-15',  # Father's Day
+    '2025-06-19',  # Juneteenth
 }
+
+DOM_CORRECTION_WEIGHT = 0.0   # bucket DOM correction — no signal at 3 months of data
+DOM_MIN_OBS = 5               # min obs per bucket cell to apply correction
+
+# Per-group morning boost (07:00-07:30) — set to 1.0 = no boost (reverted).
+MORNING_BOOST_WEEKDAY = {'A': 1.0, 'B': 1.0, 'C': 1.0, 'D': 1.0}
+MORNING_BOOST_WEEKEND = {'A': 1.0, 'B': 1.0, 'C': 1.0, 'D': 1.0}
+MORNING_INTERVALS = {'07:00', '07:30'}
+WEEKDAYS = {'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'}
+
+# Afternoon boost (15:00-16:30) — reverted, no leaderboard improvement.
+AFTERNOON_BOOST_WEEKDAY = {'A': 1.0, 'B': 1.0, 'C': 1.0, 'D': 1.0}
+AFTERNOON_INTERVALS = {'15:00', '15:30', '16:00', '16:30'}
 
 # --- Load August 2025 daily CV for each group ---
 
