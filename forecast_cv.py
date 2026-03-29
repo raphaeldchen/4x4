@@ -32,22 +32,15 @@ _EXCLUDE_DATES = {
 }
 
 # Upward bias per group (multiplicative, applied after prediction).
-# Calibrated per-portfolio so every group achieves the same effective overshoot
-# above its actual daily total, regardless of each portfolio's shape_sum.
-#
-# shape_sum is the sum of shape_call_volume across 48 intervals for a given (group, DOW).
-# C and D have shape_sum slightly > 1.0 (interval data slightly overcounts daily),
-# so they need less additional bias than A and B to hit the same target overshoot.
-#
-# Aug-weighted effective shape sums: A=0.9962, B=0.9969, C=1.0014, D=1.0014
-# At bias=1.03:  A=+2.4%, B=+2.4%, C=+3.2%, D=+3.3%  ← C/D were over-biased
-# At values below: all portfolios target +2.5% overshoot above daily totals.
-# Rationale for +2.5%: small Pt cushion without inflating EV unnecessarily.
-# C carries 46% of the EV denominator; its bias accuracy matters most.
+# Uniform 1.03 matches v17 (current leaderboard best, EV=34.802).
+# Empirical finding: lower bias → higher EV (we are underpredicting at 1.03).
+# Do NOT reduce C/D bias to compensate for shape_sum; C is 46% of EV — it
+# needs at least as much bias as A/B, not less.
+# Next tuning direction: try 1.04, 1.05, 1.06 to close gap to 1st place.
 BIAS = {
-    'shaped':     {'A': 1.029, 'B': 1.028, 'C': 1.024, 'D': 1.024},
-    'flat':       {'A': 1.0,   'B': 1.0,   'C': 1.0,   'D': 1.0  },
-    'regression': {'A': 1.029, 'B': 1.028, 'C': 1.024, 'D': 1.024},
+    'shaped':     {'A': 1.03, 'B': 1.03, 'C': 1.03, 'D': 1.03},
+    'flat':       {'A': 1.0,  'B': 1.0,  'C': 1.0,  'D': 1.0 },
+    'regression': {'A': 1.03, 'B': 1.03, 'C': 1.03, 'D': 1.03},
 }
 
 # Zero out interval CV predictions below this threshold.
