@@ -35,34 +35,27 @@ BIAS = {
 # Zero out interval CV predictions below this threshold.
 OVERNIGHT_ZERO_THRESHOLD = 0
 
-# Per-group, per-DOW-type morning boost for 07:00-07:30.
-# Jun/Apr ratios (Easter-week excluded, weekday vs weekend split):
-#   A  weekday: 1.011 → 1.01   A  weekend: 0.731 → 0.85 (strong decline → reduce)
-#   B  weekday: 1.075 → 1.08   B  weekend: 1.118 → 1.12
-#   C  weekday: 1.102 → 1.10   C  weekend: 1.169 → 1.17
-#   D  weekday: 1.057 → 1.06   D  weekend: 1.275 → 1.20 (capped; noisy small sample)
-# Previous submission used per-group uniform boost → worse. Key miss: A weekend
-# morning is declining (0.73) so uniform 1.0 was still too high for weekends.
-MORNING_BOOST_WEEKDAY = {'A': 1.0, 'B': 1.0, 'C': 1.0, 'D': 1.0}
-MORNING_BOOST_WEEKEND = {'A': 1.0, 'B': 1.0, 'C': 1.0, 'D': 1.0}
-MORNING_INTERVALS = {'07:00', '07:30'}
-WEEKDAYS = {'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'}
+# ── Seasonal / DOW adjustment (Fix 1 + Fix 3) ──────────────────────────────
+# Apply a per-(group, DOW) scaling factor that corrects for the mismatch
+# between the Apr-Jun training shape and August intraday behaviour.
+#
+# adj[g, dow] = Aug2024_meanCV(g, dow) / AprJun2025_meanCV(g, dow)
+#
+# This captures:
+#   Fix 1 — month-of-year level: how August volume compares to Q2 volume
+#   Fix 3 — DOW-specific intensity: how each DOW's relative weight shifts in Aug
+#
+# Both adjustments use the same formula; they are applied once as a combined
+# multiplier so we do not double-count.
+APPLY_SEASONAL_ADJ = False
 
-# Afternoon boost reverted — no leaderboard improvement observed.
-AFTERNOON_BOOST_WEEKDAY = {'A': 1.0, 'B': 1.0, 'C': 1.0, 'D': 1.0}
-AFTERNOON_INTERVALS = {'15:00', '15:30', '16:00', '16:30'}
-
-# DOM intramonth correction blend weight (only applies in 'shaped' mode).
-# 0.0 = pure DOW shape (current baseline).
-# DOM_correction is a multiplicative factor on the DOW shape, isolating
-# within-month billing-cycle / payday patterns after removing DOW effects.
-# Because DOM observations are noisy (only ~3 per cell), start with low weights.
-# Day-31 DOM correction is based on 1 observation (May 31 only) — unreliable;
-# it is automatically excluded (falls back to DOW-only) via the n_obs < 2 filter.
-DOM_CORRECTION_WEIGHT = 0.0   # tune via leaderboard; try 0.1, 0.2, 0.3
-# Bucket boundaries: early = days 1-10, mid = 11-20, late = 21-31 (~30 obs/cell).
-# DOM_MIN_OBS kept for safety but all bucket cells should comfortably exceed it.
-DOM_MIN_OBS = 5               # require at least this many obs; else no DOM correction
+# Holidays to exclude when computing AprJun2025 daily means (matches agg.py)
+SEASONAL_ADJ_EXCLUDE = {
+    '2025-04-18',  # Good Friday
+    '2025-04-20',  # Easter Sunday
+    '2025-05-11',  # Mother's Day
+    '2025-05-26',  # Memorial Day
+}
 
 # --- Load August 2025 daily CV for each group ---
 
@@ -217,6 +210,75 @@ if any(v != 1.0 for v in AFTERNOON_BOOST_WEEKDAY.values()):
 
 bias = BIAS[SHAPE_MODE]
 
+# ── Compute seasonal adjustment factors ────────────────────────────────────
+if APPLY_SEASONAL_ADJ:
+    adj_frames = []
+    for g in GROUPS:
+        df_all = pd.read_csv(f'cleaned_data/{g}_daily_cleaned.csv', encoding='utf-8-sig')
+        df_all['Date'] = pd.to_datetime(df_all['Date'], format='%m/%d/%y')
+        df_all['day_of_week'] = df_all['Date'].dt.day_name()
+
+        # Aug 2024 — no major US holidays in August
+        aug2024 = df_all[(df_all['Date'].dt.year == 2024) & (df_all['Date'].dt.month == 8)]
+        aug2024_mean = aug2024.groupby('day_of_week')['Call Volume'].mean().rename('aug2024_cv')
+
+        # Apr-Jun 2025 — exclude same holidays used when building the shape
+        aprjun = df_all[
+            (df_all['Date'].dt.year == 2025) &
+            df_all['Date'].dt.month.isin([4, 5, 6])
+        ]
+        aprjun = aprjun[~aprjun['Date'].dt.strftime('%Y-%m-%d').isin(SEASONAL_ADJ_EXCLUDE)]
+        aprjun_mean = aprjun.groupby('day_of_week')['Call Volume'].mean().rename('aprjun_cv')
+
+        adj = pd.concat([aug2024_mean, aprjun_mean], axis=1).reset_index()
+        adj.columns = ['day_of_week', 'aug2024_cv', 'aprjun_cv']
+        adj['seasonal_adj'] = adj['aug2024_cv'] / adj['aprjun_cv']
+        adj['group'] = g.upper()
+        adj_frames.append(adj[['group', 'day_of_week', 'seasonal_adj']])
+
+    seasonal_adj = pd.concat(adj_frames, ignore_index=True)
+
+    # Normalize so the weighted-average adj across August 2025 DOWs = 1.0 per group.
+    # This redistributes volume across DOWs (some heavier, some lighter in Aug vs Q2)
+    # without inflating the total — prevents compounding with BIAS.
+    aug_dow_counts = (
+        daily[['group', 'day_of_week']]
+        .value_counts()
+        .reset_index(name='count')
+    )
+    seasonal_adj = seasonal_adj.merge(aug_dow_counts, on=['group', 'day_of_week'], how='left')
+    seasonal_adj['count'] = seasonal_adj['count'].fillna(1)
+    seasonal_adj['_weighted'] = seasonal_adj['seasonal_adj'] * seasonal_adj['count']
+    grp_avg = (
+        seasonal_adj
+        .groupby('group')[['_weighted', 'count']]
+        .sum()
+        .assign(avg_adj=lambda x: x['_weighted'] / x['count'])
+        [['avg_adj']]
+        .reset_index()
+    )
+    seasonal_adj = seasonal_adj.drop(columns=['_weighted'])
+    seasonal_adj = seasonal_adj.merge(grp_avg, on='group')
+    seasonal_adj['seasonal_adj'] = seasonal_adj['seasonal_adj'] / seasonal_adj['avg_adj']
+    seasonal_adj = seasonal_adj[['group', 'day_of_week', 'seasonal_adj']]
+
+    print("Raw seasonal adjustment factors (Aug2024 / AprJun2025):")
+    day_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+
+    # Rebuild for display: recompute raw before normalization
+    raw_display = pd.concat(adj_frames, ignore_index=True)
+    pivot_raw = raw_display.pivot_table(values='seasonal_adj', index='group', columns='day_of_week')
+    pivot_raw = pivot_raw[[c for c in day_order if c in pivot_raw.columns]]
+    print(pivot_raw.round(3).to_string())
+
+    print("\nNormalized seasonal adjustment factors (volume-neutral DOW redistribution):")
+    pivot_norm = seasonal_adj.pivot_table(values='seasonal_adj', index='group', columns='day_of_week')
+    pivot_norm = pivot_norm[[c for c in day_order if c in pivot_norm.columns]]
+    print(pivot_norm.round(3).to_string())
+    print()
+else:
+    seasonal_adj = None
+
 # ============================================================
 # REGRESSION MODE
 # ============================================================
@@ -288,29 +350,16 @@ if SHAPE_MODE == 'regression':
 
 elif SHAPE_MODE == 'shaped':
     forecast = daily.merge(shape, on=['group', 'day_of_week'], how='left')
-
-    if shape_dom is not None:
-        def _dom_bucket(d):
-            if d <= 10: return 'early'
-            if d <= 20: return 'mid'
-            return 'late'
-        forecast['dom_bucket'] = forecast['Date'].dt.day.apply(_dom_bucket)
-        forecast = forecast.merge(
-            shape_dom, on=['group', 'dom_bucket', 'interval'], how='left'
-        )
-        # DOM correction is multiplicative on top of DOW shape.
-        # Missing DOM correction (n_obs < DOM_MIN_OBS or unmapped) → correction = 1.0 (no change).
-        forecast['dom_correction'] = forecast['dom_correction'].fillna(1.0)
-        forecast['effective_shape'] = (
-            forecast['shape_call_volume']
-            * (1 + DOM_CORRECTION_WEIGHT * (forecast['dom_correction'] - 1))
+    if APPLY_SEASONAL_ADJ and seasonal_adj is not None:
+        forecast = forecast.merge(seasonal_adj, on=['group', 'day_of_week'], how='left')
+        forecast['interval_cv'] = (
+            forecast['Call Volume'] * forecast['shape_call_volume'] *
+            forecast['seasonal_adj'] * forecast['group'].map(bias)
         )
     else:
-        forecast['effective_shape'] = forecast['shape_call_volume']
-
-    forecast['interval_cv'] = (
-        forecast['Call Volume'] * forecast['effective_shape'] * forecast['group'].map(bias)
-    )
+        forecast['interval_cv'] = (
+            forecast['Call Volume'] * forecast['shape_call_volume'] * forecast['group'].map(bias)
+        )
     forecast['interval_cv'] = forecast['interval_cv'].clip(lower=0).round().astype(int)
 
 elif SHAPE_MODE == 'flat':
