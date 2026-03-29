@@ -13,6 +13,8 @@ Abandoned_Calls = round(Abandoned_Rate × Calls_Offered), clamped to [0, Calls_O
 """
 
 import pandas as pd
+import glob
+import re
 
 # --- Load forecasts ---
 
@@ -90,8 +92,11 @@ for col in wide.columns[3:]:
         print(f"  WARNING: {negs} negative values in {col}")
 print("  No negative values found." if not any((wide[col] < 0).any() for col in wide.columns[3:]) else "")
 
-# --- Write ---
+# --- Write (auto-increment version number) ---
 
-out_path = 'forecasts/forecast_v01.csv'
+existing = glob.glob('forecasts/forecast_v*.csv')
+nums = [int(re.search(r'v(\d+)', f).group(1)) for f in existing if re.search(r'v(\d+)', f)]
+next_v = max(nums) + 1 if nums else 1
+out_path = f'forecasts/forecast_v{next_v:02d}.csv'
 wide.to_csv(out_path, index=False)
 print(f"\nWrote {len(wide)} rows to {out_path}")
