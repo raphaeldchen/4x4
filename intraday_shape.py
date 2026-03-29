@@ -11,6 +11,14 @@ GROUPS = ['a', 'b', 'c', 'd']
 # Must match SHAPE_MONTHS in agg.py.
 SHAPE_MONTHS = [4, 5, 6]
 
+# Must match EXCLUDE_DATES in agg.py.
+EXCLUDE_DATES = {
+    '2025-04-18',  # Good Friday
+    '2025-04-20',  # Easter Sunday
+    '2025-05-11',  # Mother's Day
+    '2025-05-26',  # Memorial Day
+}
+
 METRICS = [
     ('mean_call_volume',    'Call Volume'),
     ('mean_service_level',  'Service Level'),
@@ -25,16 +33,23 @@ for group in GROUPS:
     df = pd.read_csv(f'cleaned_data/{group}_daily_cleaned.csv', encoding='utf-8-sig')
     df['Date'] = pd.to_datetime(df['Date'], format='%m/%d/%y')
     df = df[(df['Date'].dt.year == 2025) & df['Date'].dt.month.isin(SHAPE_MONTHS)]
+    df = df[~df['Date'].dt.strftime('%Y-%m-%d').isin(EXCLUDE_DATES)]
     df['day_of_week'] = df['Date'].dt.day_name()
     df['group'] = group.upper()
     daily_frames.append(df)
 
 daily = pd.concat(daily_frames, ignore_index=True)
 
+def trimmed_mean(x, trim=1):
+    s = sorted(x.dropna())
+    if len(s) <= 2 * trim:
+        return x.mean()
+    return pd.Series(s[trim:-trim]).mean()
+
 daily_means = (
     daily
     .groupby(['group', 'day_of_week'])[['Call Volume', 'CCT', 'Service Level', 'Abandon Rate']]
-    .mean()
+    .agg(trimmed_mean)
     .rename(columns={
         'Call Volume':   'daily_call_volume',
         'CCT':           'daily_cct',

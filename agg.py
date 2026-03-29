@@ -16,6 +16,17 @@ SHAPE_MONTHS = [4, 5, 6]
 # Set to 1 for equal weighting.
 RECENCY_WEIGHT = 1
 
+# Dates to exclude from the shape calculation (YYYY-MM-DD).
+# These are major holidays with atypical intraday distributions that would
+# distort the shape when applied to normal August days.
+# Must match EXCLUDE_DATES in intraday_shape.py.
+EXCLUDE_DATES = {
+    '2025-04-18',  # Good Friday      — 7-13% below normal Friday
+    '2025-04-20',  # Easter Sunday     — 40-55% below normal Sunday; morning-shifted shape
+    '2025-05-11',  # Mother's Day      — 14-23% below normal Sunday
+    '2025-05-26',  # Memorial Day      — 43-51% below normal Monday
+}
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INPUT_DIR = os.path.join(BASE_DIR, 'cleaned_data')
 OUTPUT_FILE = os.path.join(BASE_DIR, 'cleaned_data', 'interval_aggregated.csv')
@@ -32,6 +43,15 @@ def parse_datetime(dt_str):
     d = datetime.date(year, month, day)
     return d.weekday(), time_part[:5]
 
+def trimmed_mean(values, trim=1):
+    """Drop `trim` lowest and `trim` highest values, return mean of remainder.
+    Falls back to plain mean if not enough observations to trim."""
+    if len(values) <= 2 * trim:
+        return sum(values) / len(values)
+    s = sorted(values)
+    trimmed = s[trim:-trim]
+    return sum(trimmed) / len(trimmed)
+
 def std_dev(values, mean):
     if len(values) < 2:
         return 0.0
@@ -47,9 +67,13 @@ for group in GROUPS:
         for row in reader:
             if not row['DateTime']:
                 continue
+            date_str = row['DateTime'].strip().split(' ')[0]  # 'YYYY-MM-DD'
             # Filter to SHAPE_MONTHS only
-            month = int(row['DateTime'].strip().split('-')[1])
+            month = int(date_str.split('-')[1])
             if month not in SHAPE_MONTHS:
+                continue
+            # Exclude holiday dates with atypical intraday distributions
+            if date_str in EXCLUDE_DATES:
                 continue
             dow, interval = parse_datetime(row['DateTime'])
             key = (group.upper(), dow, interval)
@@ -80,7 +104,7 @@ for (group, dow, interval), metrics in sorted(data.items(), key=lambda x: (x[0][
     for mk in METRIC_KEYS:
         vals = metrics.get(mk, [])
         if vals:
-            mean = sum(vals) / len(vals)
+            mean = trimmed_mean(vals)
             sd = std_dev(vals, mean)
         else:
             mean, sd = None, None

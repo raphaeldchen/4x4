@@ -9,7 +9,7 @@ GROUPS = ['a', 'b', 'c', 'd']
 # 'regression' — per-cell OLS: interval_cv = a * daily_cv + b, trained on Apr-Jun intervals
 #                The intercept captures base load independent of daily volume.
 #                In-sample vs shaped: 5.01% EV-like vs 5.26% (~4.7% MAE improvement)
-SHAPE_MODE = 'regression'
+SHAPE_MODE = 'shaped'
 
 # Upward bias per group (multiplicative, applied after prediction).
 # Reduces underprediction penalty Pt. Tune after confirming base approach.
