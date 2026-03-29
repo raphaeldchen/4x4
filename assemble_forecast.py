@@ -55,7 +55,7 @@ for g in groups:
 
 # --- Add Month and Day columns ---
 
-wide['Month'] = wide['Date'].dt.month
+wide['Month'] = wide['Date'].dt.strftime('%B')  # e.g. 'August'
 wide['Day']   = wide['Date'].dt.day
 
 # --- Final column order ---
@@ -67,6 +67,14 @@ col_order = ['Month', 'Day', 'Interval'] + [
 ]
 
 wide = wide.rename(columns={'interval': 'Interval'})
+
+# Strip leading zero from hour to match raw data format: '00:00' -> '0:00', '09:30' -> '9:30'
+wide['Interval'] = wide['Interval'].str.lstrip('0').str.replace('^:', '0:', regex=True)
+
+# Cap Abandoned_Rate at 0.95 (100% abandon rate is unrealistic and may fail validation)
+for g in groups:
+    wide[f'Abandoned_Rate_{g}'] = wide[f'Abandoned_Rate_{g}'].clip(upper=0.95)
+
 wide = wide[col_order].sort_values(['Month', 'Day', 'Interval']).reset_index(drop=True)
 
 # --- Validate ---
