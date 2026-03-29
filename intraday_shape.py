@@ -1,24 +1,20 @@
 """
 Compute intraday shape: for each (group, day_of_week, interval),
-divide interval CV by the daily CV for that group/day_of_week.
+express each 30-min interval as a fraction of the day's total.
 
-SHAPE_METHOD options:
-  'ratio_of_means' — original: trimmed_mean(interval_cv) / trimmed_mean(daily_cv)
-  'ratio_of_sums'  — Σ(interval_cv) / Σ(daily_cv) across all training days for that DOW.
-                     Equivalent to a volume-weighted mean of per-day shapes: high-volume
-                     (normal) days dominate; low-volume (holiday-adjacent) days are
-                     naturally down-weighted without needing explicit exclusion.
-                     Only applied to shape_call_volume; CCT/ABD/SL keep ratio_of_means.
+CV shape uses ratio-of-sums (volume-weighted, self-normalizing):
+  shape[g, DOW, t] = Σ(interval_cv) / Σ(all interval_cv for this DOW)
+  High-volume (normal) days dominate; anomalous days are down-weighted naturally.
+  Shape sums to exactly 1.0 per (group, DOW) by construction.
+
+CCT/ABD/SL shapes use ratio-of-means with trimmed mean.
 """
 
 import pandas as pd
 
 GROUPS = ['a', 'b', 'c', 'd']
 
-# Must match SHAPE_MONTHS in agg.py.
 SHAPE_MONTHS = [4, 5, 6]
-
-SHAPE_METHOD = 'ratio_of_sums'  # 'ratio_of_means' = original trimmed-mean approach
 
 # Must match EXCLUDE_DATES in agg.py.
 EXCLUDE_DATES = {
@@ -26,8 +22,8 @@ EXCLUDE_DATES = {
     '2025-04-20',  # Easter Sunday
     '2025-05-11',  # Mother's Day
     '2025-05-26',  # Memorial Day
-    '2025-06-15',  # Father's Day     — 5-12% below normal Sunday
-    '2025-06-19',  # Juneteenth       — 6-9% below normal Thursday
+    '2025-06-15',  # Father's Day
+    '2025-06-19',  # Juneteenth
 }
 
 METRICS = [
@@ -37,7 +33,7 @@ METRICS = [
     ('mean_cct',            'CCT'),
 ]
 
-# --- Step 1: Load daily data, filter Apr-Jun 2025, compute means by (group, dow) ---
+# --- Step 1: Load daily data, filter Apr-Jun 2025, compute trimmed means by (group, DOW) ---
 
 daily_frames = []
 for group in GROUPS:
@@ -70,69 +66,48 @@ daily_means = (
     .reset_index()
 )
 
-# --- Step 1b: Ratio-of-sums CV shape (volume-weighted, uses raw interval data) ---
-# Computed here because it reuses the already-filtered `daily` DataFrame.
-# Only affects shape_call_volume; other metrics use ratio_of_means below.
+# --- Step 2: Ratio-of-sums CV shape ---
+# Σ(interval_cv) / Σ(total interval_cv for this DOW)
+# Volume-weighted and self-normalizing: shape sums to exactly 1.0 per (group, DOW).
 
-if SHAPE_METHOD == 'ratio_of_sums':
-    # Load raw interval data with the same SHAPE_MONTHS + EXCLUDE_DATES filter.
-    intv_frames = []
-    for group in GROUPS:
-        df = pd.read_csv(f'cleaned_data/{group}_interval_cleaned.csv', encoding='utf-8-sig')
-        df['Date'] = pd.to_datetime(df['Date'], format='%m/%d/%y')
-        df = df[(df['Date'].dt.year == 2025) & df['Date'].dt.month.isin(SHAPE_MONTHS)]
-        df = df[~df['Date'].dt.strftime('%Y-%m-%d').isin(EXCLUDE_DATES)]
-        df['day_of_week'] = df['Date'].dt.day_name()
-        df['group'] = group.upper()
-        intv_frames.append(df[['group', 'day_of_week', 'Interval', 'Call Volume']])
+intv_frames = []
+for group in GROUPS:
+    df = pd.read_csv(f'cleaned_data/{group}_interval_cleaned.csv', encoding='utf-8-sig')
+    df['Date'] = pd.to_datetime(df['Date'], format='%m/%d/%y')
+    df = df[(df['Date'].dt.year == 2025) & df['Date'].dt.month.isin(SHAPE_MONTHS)]
+    df = df[~df['Date'].dt.strftime('%Y-%m-%d').isin(EXCLUDE_DATES)]
+    df['day_of_week'] = df['Date'].dt.day_name()
+    df['group'] = group.upper()
+    intv_frames.append(df[['group', 'day_of_week', 'Interval', 'Call Volume']])
 
-    intervals_raw = pd.concat(intv_frames, ignore_index=True)
-    # Normalize single-digit hours to zero-padded HH:MM (e.g. '9:00' → '09:00')
-    intervals_raw['Interval'] = intervals_raw['Interval'].str.replace(
-        r'^(\d):(\d{2})$', r'0\1:\2', regex=True
-    )
+intervals_raw = pd.concat(intv_frames, ignore_index=True)
+intervals_raw['Interval'] = intervals_raw['Interval'].str.replace(
+    r'^(\d):(\d{2})$', r'0\1:\2', regex=True
+)
 
-    # Numerator: Σ(interval_cv) per (group, DOW, interval)
-    interval_cv_sums = (
-        intervals_raw.groupby(['group', 'day_of_week', 'Interval'])['Call Volume']
-        .sum()
-        .reset_index()
-        .rename(columns={'Interval': 'interval', 'Call Volume': 'sum_interval_cv'})
-    )
+interval_cv_sums = (
+    intervals_raw.groupby(['group', 'day_of_week', 'Interval'])['Call Volume']
+    .sum().reset_index()
+    .rename(columns={'Interval': 'interval', 'Call Volume': 'sum_interval_cv'})
+)
+total_cv_per_dow = (
+    intervals_raw.groupby(['group', 'day_of_week'])['Call Volume']
+    .sum().rename('total_interval_cv').reset_index()
+)
+ros_shape = interval_cv_sums.merge(total_cv_per_dow, on=['group', 'day_of_week'])
+ros_shape['shape_call_volume'] = ros_shape['sum_interval_cv'] / ros_shape['total_interval_cv']
 
-    # Denominator: Σ(interval_cv) across ALL intervals per (group, DOW).
-    # Using the interval data as its own denominator guarantees shape sums to exactly 1.0
-    # per (group, DOW), regardless of any daily↔interval data discrepancies.
-    total_cv_per_dow = (
-        intervals_raw.groupby(['group', 'day_of_week'])['Call Volume']
-        .sum()
-        .rename('total_interval_cv')
-        .reset_index()
-    )
+shape_check = ros_shape.groupby(['group', 'day_of_week'])['shape_call_volume'].sum().round(4)
+assert (shape_check == 1.0).all(), f"Shape sums not 1.0: {shape_check[shape_check != 1.0]}"
+print(f"Ratio-of-sums shape: {len(ros_shape)} cells, all DOW sums=1.0 OK")
 
-    ros_shape = interval_cv_sums.merge(total_cv_per_dow, on=['group', 'day_of_week'])
-    ros_shape['shape_call_volume_ros'] = ros_shape['sum_interval_cv'] / ros_shape['total_interval_cv']
-
-    # Sanity check: verify shapes sum to 1.0 per (group, DOW)
-    shape_check = (
-        ros_shape.groupby(['group', 'day_of_week'])['shape_call_volume_ros'].sum().round(4)
-    )
-    assert (shape_check == 1.0).all(), f"Shape sums not 1.0: {shape_check[shape_check != 1.0]}"
-    print(
-        f"Ratio-of-sums shape: {len(ros_shape)} cells, "
-        f"mean={ros_shape['shape_call_volume_ros'].mean():.5f}, "
-        f"max={ros_shape['shape_call_volume_ros'].max():.5f}, "
-        f"all DOW sums=1.0 OK"
-    )
-
-# --- Step 2: Load staffing, filter Apr-Jun 2025, compute means by dow per group ---
+# --- Step 3: Load staffing, compute means by (group, DOW) ---
 
 staffing = pd.read_csv('cleaned_data/daily_staffing_cleaned.csv', encoding='utf-8-sig')
 staffing['Date'] = pd.to_datetime(staffing['Date'], format='%m/%d/%y')
 staffing = staffing[(staffing['Date'].dt.year == 2025) & staffing['Date'].dt.month.isin(SHAPE_MONTHS)]
 staffing['day_of_week'] = staffing['Date'].dt.day_name()
 
-# Melt wide (A, B, C, D columns) to long form so we can join on (group, day_of_week)
 staffing_long = staffing.melt(
     id_vars=['day_of_week'],
     value_vars=['A', 'B', 'C', 'D'],
@@ -142,37 +117,32 @@ staffing_long = staffing.melt(
 staffing_means = (
     staffing_long
     .groupby(['group', 'day_of_week'])['staffing']
-    .mean()
-    .rename('daily_staffing')
-    .reset_index()
+    .mean().rename('daily_staffing').reset_index()
 )
 
-# --- Step 3: Load interval_aggregated.csv, join daily means and staffing ---
+# --- Step 4: Load interval_aggregated.csv, join daily means and staffing ---
 
 shape = pd.read_csv('cleaned_data/interval_aggregated.csv', encoding='utf-8-sig')
-
 shape = shape.merge(daily_means, on=['group', 'day_of_week'], how='left')
 shape = shape.merge(staffing_means, on=['group', 'day_of_week'], how='left')
 
-# --- Step 4: Compute shape ratios ---
+# --- Step 5: Compute shape ratios for CCT/ABD/SL (ratio-of-means) ---
 
 for interval_col, _ in METRICS:
     short = interval_col.replace('mean_', '')
     daily_col = f'daily_{short}'
     shape[f'shape_{short}'] = shape[interval_col] / shape[daily_col]
 
-# --- Step 4b: Override shape_call_volume with ratio-of-sums if selected ---
+# --- Step 6: Override shape_call_volume with ratio-of-sums ---
 
-if SHAPE_METHOD == 'ratio_of_sums':
-    shape = shape.drop(columns=['shape_call_volume'])
-    shape = shape.merge(
-        ros_shape[['group', 'day_of_week', 'interval', 'shape_call_volume_ros']]
-        .rename(columns={'shape_call_volume_ros': 'shape_call_volume'}),
-        on=['group', 'day_of_week', 'interval'],
-        how='left',
-    )
+shape = shape.drop(columns=['shape_call_volume'])
+shape = shape.merge(
+    ros_shape[['group', 'day_of_week', 'interval', 'shape_call_volume']],
+    on=['group', 'day_of_week', 'interval'],
+    how='left',
+)
 
-# --- Step 5: Select and order output columns ---
+# --- Step 7: Output ---
 
 output_cols = [
     'group', 'day_of_week', 'interval',
@@ -190,181 +160,6 @@ shape = shape.rename(columns={
     'mean_cct':            'interval_cct',
 })
 
-# If SHAPE_MONTHS excludes some months, certain (group, DOW, interval) combos
-# may be missing. Fill gaps using the full Apr-Jun shape as a fallback.
-if len(shape) < 1344:
-    fallback = pd.read_csv('cleaned_data/intraday_shape_aprijun.csv', encoding='utf-8-sig')
-    shape = (
-        fallback[['group', 'day_of_week', 'interval']]
-        .merge(shape[output_cols], on=['group', 'day_of_week', 'interval'], how='left')
-    )
-    for col in output_cols:
-        if col not in shape.columns:
-            shape[col] = fallback[col]
-    # Fill any remaining NaN shape columns from fallback
-    for col in [c for c in output_cols if c.startswith('shape_') or c.startswith('daily_') or c.startswith('interval_')]:
-        shape[col] = shape[col].fillna(fallback[col])
-    missing = 1344 - shape[output_cols].dropna().shape[0]
-    print(f'Filled {1344 - len(shape[shape[output_cols[3]].notna()])} missing intervals from Apr-Jun fallback')
-
-out_path = 'cleaned_data/intraday_shape.csv'
-shape[output_cols].to_csv(out_path, index=False)
-
-print(f'Wrote {len(shape)} rows to {out_path}')
+shape[output_cols].to_csv('cleaned_data/intraday_shape.csv', index=False)
+print(f'Wrote {len(shape)} rows to cleaned_data/intraday_shape.csv')
 print(f'Expected 1344 rows, got {len(shape)}')
-
-# =============================================================================
-# DOM intramonth correction factors
-#
-# Goal: isolate the within-month call pattern from DOW effects.
-#
-# Method:
-#   1. For each (group, date, interval) in Apr-Jun, compute the per-date shape:
-#        actual_shape = interval_cv / daily_cv_that_day
-#   2. Look up the DOW baseline shape for that (group, DOW, interval).
-#   3. DOM residual = actual_shape / DOW_baseline  (~1.0 on average)
-#   4. Average residuals by (group, day_of_month, interval) across the 3 months.
-#
-# Usage in forecast: predicted = daily_cv × DOW_shape × DOM_correction
-# DOM_correction ≈ 1.0 means no intramonth adjustment; values above/below 1.0
-# indicate that interval tends to run higher/lower than the DOW baseline on
-# that day of the month (e.g., billing-cycle effects).
-#
-# Caveats:
-#   - Only 3 observations per (group, DOM, interval) cell — high variance.
-#   - Day 31 has only 1 observation (May 31); its correction is unreliable.
-# =============================================================================
-
-# Build (group, date) daily CV lookup from cleaned daily files
-daily_cv_lookup = {}
-for grp in GROUPS:
-    df = pd.read_csv(f'cleaned_data/{grp}_daily_cleaned.csv', encoding='utf-8-sig')
-    df['Date'] = pd.to_datetime(df['Date'], format='%m/%d/%y')
-    df = df[(df['Date'].dt.year == 2025) & df['Date'].dt.month.isin(SHAPE_MONTHS)]
-    df = df[~df['Date'].dt.strftime('%Y-%m-%d').isin(EXCLUDE_DATES)]
-    for _, row in df.iterrows():
-        daily_cv_lookup[(grp.upper(), row['Date'].strftime('%Y-%m-%d'))] = row['Call Volume']
-
-# Load per-interval observations from cleaned interval files
-intv_rows = []
-for grp in GROUPS:
-    df = pd.read_csv(f'cleaned_data/{grp}_interval_cleaned.csv', encoding='utf-8-sig')
-    df['Date'] = pd.to_datetime(df['Date'], format='%m/%d/%y')
-    df = df[df['Date'].dt.month.isin(SHAPE_MONTHS)]
-    df = df[~df['Date'].dt.strftime('%Y-%m-%d').isin(EXCLUDE_DATES)]
-    df['group'] = grp.upper()
-    df['date_str'] = df['Date'].dt.strftime('%Y-%m-%d')
-    df['day_of_month'] = df['Date'].dt.day
-    df['day_of_week'] = df['Date'].dt.day_name()
-    # Normalize interval to zero-padded HH:MM
-    df['interval'] = df['Interval'].apply(
-        lambda x: f"{int(x.split(':')[0]):02d}:{x.split(':')[1]}" if isinstance(x, str) else None
-    )
-    intv_rows.append(df[['group', 'date_str', 'day_of_month', 'day_of_week', 'interval', 'Call Volume']])
-
-intv_all = pd.concat(intv_rows, ignore_index=True)
-intv_all = intv_all[intv_all['interval'].notna() & intv_all['Call Volume'].notna()]
-
-# Look up daily CV for each row
-intv_all['daily_cv'] = intv_all.apply(
-    lambda r: daily_cv_lookup.get((r['group'], r['date_str'])), axis=1
-)
-intv_all = intv_all[intv_all['daily_cv'].notna() & (intv_all['daily_cv'] > 0)]
-
-# Compute per-date actual shape ratio for each (group, date, interval)
-intv_all['actual_shape'] = intv_all['Call Volume'] / intv_all['daily_cv']
-
-# Load DOW baseline shape for lookup
-dow_shape_lookup = (
-    shape[['group', 'day_of_week', 'interval', 'shape_call_volume']]
-    .set_index(['group', 'day_of_week', 'interval'])['shape_call_volume']
-)
-
-intv_all['dow_shape'] = intv_all.set_index(['group', 'day_of_week', 'interval']).index.map(
-    dow_shape_lookup
-)
-intv_all['dow_shape'] = intv_all.apply(
-    lambda r: dow_shape_lookup.get((r['group'], r['day_of_week'], r['interval'])), axis=1
-)
-
-# DOM residual = actual_shape / DOW_baseline (exclude rows where DOW shape is 0 or missing)
-valid = intv_all['dow_shape'].notna() & (intv_all['dow_shape'] > 0)
-intv_all.loc[valid, 'dom_residual'] = (
-    intv_all.loc[valid, 'actual_shape'] / intv_all.loc[valid, 'dow_shape']
-)
-
-# Average DOM residuals by (group, day_of_month, interval) using trimmed mean
-def trimmed_mean_series(s, trim=1):
-    vals = s.dropna().tolist()
-    if len(vals) == 0:
-        return None
-    if len(vals) <= 2 * trim:
-        return sum(vals) / len(vals)
-    s_sorted = sorted(vals)
-    trimmed = s_sorted[trim:-trim]
-    return sum(trimmed) / len(trimmed)
-
-dom_correction = (
-    intv_all[valid]
-    .groupby(['group', 'day_of_month', 'interval'])['dom_residual']
-    .agg(trimmed_mean_series)
-    .rename('dom_correction')
-    .reset_index()
-)
-
-# Count observations per cell for diagnostics
-dom_n_obs = (
-    intv_all[valid]
-    .groupby(['group', 'day_of_month', 'interval'])['dom_residual']
-    .count()
-    .rename('n_obs')
-    .reset_index()
-)
-dom_correction = dom_correction.merge(dom_n_obs, on=['group', 'day_of_month', 'interval'])
-
-dom_out_path = 'cleaned_data/intraday_shape_dom.csv'
-dom_correction.to_csv(dom_out_path, index=False)
-
-print(f'\nWrote {len(dom_correction)} rows to {dom_out_path}')
-print(f'Expected at most: 4 groups x 31 days x 48 intervals = {4*31*48} rows')
-print(f'DOM correction factor stats:')
-print(dom_correction['dom_correction'].describe().round(4).to_string())
-print(f'Cells with n_obs == 1 (day-31 only, unreliable): {(dom_correction["n_obs"] == 1).sum()}')
-
-# ── Bucketed DOM correction (early=1-10, mid=11-20, late=21-31) ──────────────
-# ~30 observations per (group, bucket, interval) cell vs ~3 for per-DOM.
-# Much lower variance; this is the version used in forecast_cv.py.
-
-def dom_to_bucket(dom):
-    if dom <= 10:  return 'early'
-    if dom <= 20:  return 'mid'
-    return 'late'
-
-intv_all['dom_bucket'] = intv_all['day_of_month'].apply(dom_to_bucket)
-
-dom_bucket_correction = (
-    intv_all[valid]
-    .groupby(['group', 'dom_bucket', 'interval'])['dom_residual']
-    .agg(trimmed_mean_series)
-    .rename('dom_correction')
-    .reset_index()
-)
-dom_bucket_n_obs = (
-    intv_all[valid]
-    .groupby(['group', 'dom_bucket', 'interval'])['dom_residual']
-    .count()
-    .rename('n_obs')
-    .reset_index()
-)
-dom_bucket_correction = dom_bucket_correction.merge(
-    dom_bucket_n_obs, on=['group', 'dom_bucket', 'interval']
-)
-
-dom_bucket_out_path = 'cleaned_data/intraday_shape_dom_bucket.csv'
-dom_bucket_correction.to_csv(dom_bucket_out_path, index=False)
-
-print(f'\nWrote {len(dom_bucket_correction)} rows to {dom_bucket_out_path}')
-print(f'Expected: 4 groups x 3 buckets x 48 intervals = {4*3*48} rows')
-print(f'Bucket DOM correction factor stats:')
-print(dom_bucket_correction['dom_correction'].describe().round(4).to_string())
-print(f'n_obs range: {dom_bucket_correction["n_obs"].min()}–{dom_bucket_correction["n_obs"].max()}')

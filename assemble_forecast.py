@@ -92,6 +92,6 @@ print("  No negative values found." if not any((wide[col] < 0).any() for col in 
 
 # --- Write ---
 
-out_path = 'forecasts/forecast_v40.csv'
+out_path = 'forecasts/forecast_v31.csv'
 wide.to_csv(out_path, index=False)
 print(f"\nWrote {len(wide)} rows to {out_path}")
