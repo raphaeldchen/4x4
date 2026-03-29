@@ -12,10 +12,15 @@ SHAPE_MONTHS = [4, 5, 6]
 EXCLUDE_DATES = {
     '2025-04-18',  # Good Friday      — 7-13% below normal Friday
     '2025-04-20',  # Easter Sunday     — 40-55% below normal Sunday; morning-shifted shape
+    '2025-04-21',  # Easter return day — Mon after Easter weekend
     '2025-05-11',  # Mother's Day      — 14-23% below normal Sunday
+    '2025-05-12',  # Mother's Day return day — Mon
     '2025-05-26',  # Memorial Day      — 43-51% below normal Monday
+    '2025-05-27',  # Memorial Day return day — Tue (catch-up volume)
     '2025-06-15',  # Father's Day      — 5-12% below normal Sunday (Groups C, D)
+    '2025-06-16',  # Father's Day return day — Mon
     '2025-06-19',  # Juneteenth        — 6-9% below normal Thursday (Groups A, C, D)
+    '2025-06-20',  # Juneteenth return day — Fri
 }
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))

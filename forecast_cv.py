@@ -18,11 +18,19 @@ SHAPE_SMOOTH_WINDOW = 5   # kernel: [0.10, 0.20, 0.40, 0.20, 0.10]
 _EXCLUDE_DATES = {
     '2025-04-18',  # Good Friday
     '2025-04-20',  # Easter Sunday
+    '2025-04-21',  # Easter return day (Mon)
     '2025-05-11',  # Mother's Day
+    '2025-05-12',  # Mother's Day return day (Mon)
     '2025-05-26',  # Memorial Day
+    '2025-05-27',  # Memorial Day return day (Tue)
     '2025-06-15',  # Father's Day
+    '2025-06-16',  # Father's Day return day (Mon)
     '2025-06-19',  # Juneteenth
+    '2025-06-20',  # Juneteenth return day (Fri)
 }
+
+WEEKDAYS = {'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'}
+WEEKEND_BIAS = 1.044  # same as weekday = uniform bias
 
 # --- Load August 2025 daily CV for each group ---
 
@@ -64,8 +72,12 @@ shape = pd.concat(smooth_parts).reset_index(drop=True)
 # --- Predict: interval_cv = daily_cv × shape × bias ---
 
 forecast = daily.merge(shape, on=['group', 'day_of_week'], how='left')
+forecast['_bias'] = forecast.apply(
+    lambda r: BIAS[r['group']] if r['day_of_week'] in WEEKDAYS else WEEKEND_BIAS,
+    axis=1
+)
 forecast['interval_cv'] = (
-    forecast['Call Volume'] * forecast['shape_call_volume'] * forecast['group'].map(BIAS)
+    forecast['Call Volume'] * forecast['shape_call_volume'] * forecast['_bias']
 )
 forecast['interval_cv'] = forecast['interval_cv'].clip(lower=0).round().astype(int)
 

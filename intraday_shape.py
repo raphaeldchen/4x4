@@ -20,10 +20,15 @@ SHAPE_MONTHS = [4, 5, 6]
 EXCLUDE_DATES = {
     '2025-04-18',  # Good Friday
     '2025-04-20',  # Easter Sunday
+    '2025-04-21',  # Easter return day (Mon)
     '2025-05-11',  # Mother's Day
+    '2025-05-12',  # Mother's Day return day (Mon)
     '2025-05-26',  # Memorial Day
+    '2025-05-27',  # Memorial Day return day (Tue)
     '2025-06-15',  # Father's Day
+    '2025-06-16',  # Father's Day return day (Mon)
     '2025-06-19',  # Juneteenth
+    '2025-06-20',  # Juneteenth return day (Fri)
 }
 
 METRICS = [
