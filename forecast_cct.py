@@ -3,23 +3,27 @@ Forecast interval-level CCT for August 2025.
 Method: August daily CCT (known) × intraday shape ratio (from Apr-Jun 2025).
 CCT is set to 0 for any interval where forecasted CV = 0 (those intervals
 are excluded from scoring entirely, so they should not contribute noise).
+
+SHAPE_MODE options:
+  'shaped' — multiply daily CCT by the Apr-Jun intraday shape ratio (original approach)
+  'flat'   — use daily CCT uniformly across all intervals (no shape adjustment)
 """
 
 import pandas as pd
 
 GROUPS = ['a', 'b', 'c', 'd']
 
+# Toggle between 'shaped' and 'flat' to compare submission scores
+SHAPE_MODE = 'flat'
+
 # Upward bias per group to reduce underprediction penalty (Pt).
-# Groups C and D run low vs daily CCT due to more low-CCT overnight intervals,
-# so they need a larger correction than A and B.
+# Only applies in 'shaped' mode — in 'flat' mode set all to 1.0 first to isolate the shape effect.
 BIAS = {
-    'A': 1.05,
-    'B': 1.06,
-    'C': 1.10,
-    'D': 1.15,
+    'shaped': {'A': 1.05, 'B': 1.06, 'C': 1.10, 'D': 1.15},
+    'flat':   {'A': 1.0,  'B': 1.0,  'C': 1.0,  'D': 1.0 },
 }
 
-# --- Load shape ---
+# --- Load shape (only used in 'shaped' mode) ---
 
 shape = pd.read_csv('cleaned_data/intraday_shape.csv')[
     ['group', 'day_of_week', 'interval', 'shape_cct']
@@ -44,11 +48,16 @@ forecast = daily.merge(shape, on=['group', 'day_of_week'], how='left')
 
 # --- Compute interval CCT ---
 
-forecast['interval_cct'] = forecast['CCT'] * forecast['shape_cct'] * forecast['group'].map(BIAS)
+bias = BIAS[SHAPE_MODE]
+
+if SHAPE_MODE == 'shaped':
+    forecast['interval_cct'] = forecast['CCT'] * forecast['shape_cct'] * forecast['group'].map(bias)
+elif SHAPE_MODE == 'flat':
+    forecast['interval_cct'] = forecast['CCT'] * forecast['group'].map(bias)
+
 forecast['interval_cct'] = forecast['interval_cct'].clip(lower=0).round(2)
 
 # --- Zero out CCT where CV forecast is zero ---
-# Load CV forecast to identify zero-volume intervals
 
 cv = pd.read_csv('forecasts/cv_forecast.csv')
 cv['Date'] = pd.to_datetime(cv['Date'])
@@ -60,7 +69,7 @@ forecast = forecast.merge(
 )
 forecast.loc[forecast['interval_cv'] == 0, 'interval_cct'] = 0
 
-# --- Validate: check CCT stays in a reasonable range vs daily CCT ---
+# --- Validate ---
 
 validation = (
     forecast
@@ -71,6 +80,7 @@ validation = (
     )
 )
 validation['ratio'] = (validation['interval_cct_mean'] / validation['daily_cct_mean']).round(4)
+print(f"SHAPE_MODE = '{SHAPE_MODE}'")
 print("Validation — mean interval CCT vs mean daily CCT (ratio should be ~BIAS):")
 print(validation.round(2).to_string())
 print()
