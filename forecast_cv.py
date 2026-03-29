@@ -11,23 +11,7 @@ BIAS = {'A': 1.044, 'B': 1.044, 'C': 1.044, 'D': 1.044}
 # Blend raw shape with circular-kernel-smoothed version to reduce per-cell estimation noise.
 # ~12 obs/cell from Apr-Jun; smoothing reduces noise while preserving broad patterns.
 # Optimal: alpha=0.5, window=5 (v31, EV=34.148, rank 6).
-SHAPE_SMOOTH_ALPHA  = 0.5
-SHAPE_SMOOTH_WINDOW = 5   # kernel: [0.10, 0.20, 0.40, 0.20, 0.10]
-
-# Must match EXCLUDE_DATES in agg.py / intraday_shape.py.
-_EXCLUDE_DATES = {
-    '2025-04-18',  # Good Friday
-    '2025-04-20',  # Easter Sunday
-    '2025-04-21',  # Easter return day (Mon)
-    '2025-05-11',  # Mother's Day
-    '2025-05-12',  # Mother's Day return day (Mon)
-    '2025-05-26',  # Memorial Day
-    '2025-05-27',  # Memorial Day return day (Tue)
-    '2025-06-15',  # Father's Day
-    '2025-06-16',  # Father's Day return day (Mon)
-    '2025-06-19',  # Juneteenth
-    '2025-06-20',  # Juneteenth return day (Fri)
-}
+SHAPE_SMOOTH_ALPHA = 0.5
 
 WEEKDAYS = {'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'}
 WEEKEND_BIAS = 1.044  # same as weekday = uniform bias
