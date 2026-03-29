@@ -1,22 +1,9 @@
-"""
-Compute intraday shape: for each (group, day_of_week, interval),
-express each 30-min interval as a fraction of the day's total.
-
-CV shape uses ratio-of-sums (volume-weighted, self-normalizing):
-  shape[g, DOW, t] = Σ(interval_cv) / Σ(all interval_cv for this DOW)
-  High-volume (normal) days dominate; anomalous days are down-weighted naturally.
-  Shape sums to exactly 1.0 per (group, DOW) by construction.
-
-CCT/ABD/SL shapes use ratio-of-means with trimmed mean.
-"""
-
 import pandas as pd
 
 GROUPS = ['a', 'b', 'c', 'd']
-
 SHAPE_MONTHS = [4, 5, 6]
 
-# Must match EXCLUDE_DATES in agg.py.
+# keep in sync with agg.py
 EXCLUDE_DATES = {
     '2025-04-18',  # Good Friday
     '2025-04-20',  # Easter Sunday
@@ -31,14 +18,8 @@ EXCLUDE_DATES = {
     '2025-06-20',  # Juneteenth return day (Fri)
 }
 
-METRICS = [
-    ('mean_call_volume',    'Call Volume'),
-    ('mean_service_level',  'Service Level'),
-    ('mean_abandoned_rate', 'Abandon Rate'),
-    ('mean_cct',            'CCT'),
-]
-
-# --- Step 1: Load daily data, filter Apr-Jun 2025, compute trimmed means by (group, DOW) ---
+# metrics to compute ratio-of-means shapes for (CV gets overwritten with ratio-of-sums)
+SHAPE_METRICS = ['call_volume', 'service_level', 'abandoned_rate', 'cct']
 
 daily_frames = []
 for group in GROUPS:
@@ -63,17 +44,13 @@ daily_means = (
     .groupby(['group', 'day_of_week'])[['Call Volume', 'CCT', 'Service Level', 'Abandon Rate']]
     .agg(trimmed_mean)
     .rename(columns={
-        'Call Volume':   'daily_call_volume',
-        'CCT':           'daily_cct',
+        'Call Volume': 'daily_call_volume',
+        'CCT': 'daily_cct',
         'Service Level': 'daily_service_level',
-        'Abandon Rate':  'daily_abandoned_rate',
+        'Abandon Rate': 'daily_abandoned_rate',
     })
     .reset_index()
 )
-
-# --- Step 2: Ratio-of-sums CV shape ---
-# Σ(interval_cv) / Σ(total interval_cv for this DOW)
-# Volume-weighted and self-normalizing: shape sums to exactly 1.0 per (group, DOW).
 
 intv_frames = []
 for group in GROUPS:
@@ -90,23 +67,22 @@ intervals_raw['Interval'] = intervals_raw['Interval'].str.replace(
     r'^(\d):(\d{2})$', r'0\1:\2', regex=True
 )
 
-interval_cv_sums = (
+# ratio-of-sums CV shape: volume-weighted, sums to exactly 1.0 per (group, DOW)
+iv_sums = (
     intervals_raw.groupby(['group', 'day_of_week', 'Interval'])['Call Volume']
     .sum().reset_index()
-    .rename(columns={'Interval': 'interval', 'Call Volume': 'sum_interval_cv'})
+    .rename(columns={'Interval': 'interval', 'Call Volume': 'sum_cv'})
 )
-total_cv_per_dow = (
+dow_totals = (
     intervals_raw.groupby(['group', 'day_of_week'])['Call Volume']
-    .sum().rename('total_interval_cv').reset_index()
+    .sum().rename('total_cv').reset_index()
 )
-ros_shape = interval_cv_sums.merge(total_cv_per_dow, on=['group', 'day_of_week'])
-ros_shape['shape_call_volume'] = ros_shape['sum_interval_cv'] / ros_shape['total_interval_cv']
+ros_shape = iv_sums.merge(dow_totals, on=['group', 'day_of_week'])
+ros_shape['shape_call_volume'] = ros_shape['sum_cv'] / ros_shape['total_cv']
 
 shape_check = ros_shape.groupby(['group', 'day_of_week'])['shape_call_volume'].sum().round(4)
 assert (shape_check == 1.0).all(), f"Shape sums not 1.0: {shape_check[shape_check != 1.0]}"
 print(f"Ratio-of-sums shape: {len(ros_shape)} cells, all DOW sums=1.0 OK")
-
-# --- Step 3: Load staffing, compute means by (group, DOW) ---
 
 staffing = pd.read_csv('cleaned_data/daily_staffing_cleaned.csv', encoding='utf-8-sig')
 staffing['Date'] = pd.to_datetime(staffing['Date'], format='%m/%d/%y')
@@ -125,21 +101,14 @@ staffing_means = (
     .mean().rename('daily_staffing').reset_index()
 )
 
-# --- Step 4: Load interval_aggregated.csv, join daily means and staffing ---
-
 shape = pd.read_csv('cleaned_data/interval_aggregated.csv', encoding='utf-8-sig')
 shape = shape.merge(daily_means, on=['group', 'day_of_week'], how='left')
 shape = shape.merge(staffing_means, on=['group', 'day_of_week'], how='left')
 
-# --- Step 5: Compute shape ratios for CCT/ABD/SL (ratio-of-means) ---
+for m in SHAPE_METRICS:
+    shape[f'shape_{m}'] = shape[f'mean_{m}'] / shape[f'daily_{m}']
 
-for interval_col, _ in METRICS:
-    short = interval_col.replace('mean_', '')
-    daily_col = f'daily_{short}'
-    shape[f'shape_{short}'] = shape[interval_col] / shape[daily_col]
-
-# --- Step 6: Override shape_call_volume with ratio-of-sums ---
-
+# replace CV shape with ratio-of-sums version
 shape = shape.drop(columns=['shape_call_volume'])
 shape = shape.merge(
     ros_shape[['group', 'day_of_week', 'interval', 'shape_call_volume']],
@@ -147,24 +116,22 @@ shape = shape.merge(
     how='left',
 )
 
-# --- Step 7: Output ---
+shape = shape.rename(columns={
+    'mean_call_volume': 'interval_call_volume',
+    'mean_service_level': 'interval_service_level',
+    'mean_abandoned_rate': 'interval_abandoned_rate',
+    'mean_cct': 'interval_cct',
+})
 
-output_cols = [
+out_cols = [
     'group', 'day_of_week', 'interval',
-    'interval_call_volume',    'daily_call_volume',    'shape_call_volume',
-    'interval_service_level',  'daily_service_level',  'shape_service_level',
+    'interval_call_volume', 'daily_call_volume', 'shape_call_volume',
+    'interval_service_level', 'daily_service_level', 'shape_service_level',
     'interval_abandoned_rate', 'daily_abandoned_rate', 'shape_abandoned_rate',
-    'interval_cct',            'daily_cct',            'shape_cct',
+    'interval_cct', 'daily_cct', 'shape_cct',
     'daily_staffing',
 ]
 
-shape = shape.rename(columns={
-    'mean_call_volume':    'interval_call_volume',
-    'mean_service_level':  'interval_service_level',
-    'mean_abandoned_rate': 'interval_abandoned_rate',
-    'mean_cct':            'interval_cct',
-})
-
-shape[output_cols].to_csv('cleaned_data/intraday_shape.csv', index=False)
+shape[out_cols].to_csv('cleaned_data/intraday_shape.csv', index=False)
 print(f'Wrote {len(shape)} rows to cleaned_data/intraday_shape.csv')
 print(f'Expected 1344 rows, got {len(shape)}')

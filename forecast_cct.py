@@ -2,20 +2,14 @@ import pandas as pd
 
 GROUPS = ['a', 'b', 'c', 'd']
 
-# cv_gated: high-CV intervals use direct_blend (reliable Apr-Jun shape signal);
-# low-CV overnight intervals use flat daily CCT (Apr-Jun mean is noise-dominated).
-# alpha=0.9: 90% Apr-Jun interval CCT + 10% August daily CCT.
-# CV_THRESHOLD=15: intervals with fewer than 15 predicted calls use flat CCT.
+# high-CV slots: blend Apr-Jun shape with August daily (90/10)
+# low-CV overnight slots: flat daily CCT — Apr-Jun overnight mean is too noisy
 ALPHA = 0.9
 CV_THRESHOLD = 15
-
-# --- Load shape ---
 
 shape = pd.read_csv('cleaned_data/intraday_shape.csv')[
     ['group', 'day_of_week', 'interval', 'interval_cct', 'daily_cct']
 ]
-
-# --- Load August 2025 daily CCT for each group ---
 
 daily_frames = []
 for g in GROUPS:
@@ -28,7 +22,7 @@ for g in GROUPS:
 daily = pd.concat(daily_frames, ignore_index=True)
 daily['day_of_week'] = daily['Date'].dt.day_name()
 
-# --- Join shape and CV forecast onto daily ---
+# need CV forecast to gate on interval_cv < CV_THRESHOLD
 
 forecast = daily.merge(shape, on=['group', 'day_of_week'], how='left')
 
@@ -40,7 +34,7 @@ forecast = forecast.merge(
     how='left'
 )
 
-# --- Compute interval CCT (cv_gated direct_blend) ---
+# default flat; override for high-CV slots
 
 high_cv = forecast['interval_cv'] >= CV_THRESHOLD
 forecast['interval_cct_pred'] = forecast['CCT'].copy()  # default: flat daily CCT
@@ -51,10 +45,8 @@ forecast.loc[high_cv, 'interval_cct_pred'] = (
 
 forecast['interval_cct_pred'] = forecast['interval_cct_pred'].clip(lower=0).round(2)
 
-# Zero out CCT where CV = 0
+# no calls → no talk time
 forecast.loc[forecast['interval_cv'] == 0, 'interval_cct_pred'] = 0
-
-# --- Validate ---
 
 n_gated = (forecast['interval_cv'] < CV_THRESHOLD).sum()
 validation = (
@@ -70,8 +62,6 @@ print(f"cv_gated | ALPHA={ALPHA} | CV_THRESHOLD={CV_THRESHOLD} ({n_gated} interv
 print("Validation — mean interval CCT vs Aug daily CCT:")
 print(validation.round(2).to_string())
 print()
-
-# --- Output ---
 
 out = forecast[['group', 'Date', 'day_of_week', 'interval', 'interval_cct_pred']].rename(
     columns={'interval_cct_pred': 'interval_cct'}

@@ -1,10 +1,4 @@
-"""
-Test suite for the data cleaning / feature engineering pipeline.
-Covers cleaning.py, agg.py, and intraday_shape.py functions.
-
-Run with:  python -m pytest test_pipeline.py -v
-           python test_pipeline.py   (also works via unittest)
-"""
+# python -m pytest test_pipeline.py -v  (or just python test_pipeline.py)
 
 import math
 import unittest
@@ -17,35 +11,18 @@ import sys
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CLEANED_DIR = os.path.join(BASE_DIR, 'cleaned_data')
 
-# ---------------------------------------------------------------------------
-# Import the pure functions from cleaning.py without executing its top-level
-# side effects (file reads / writes).  We monkey-patch pd.read_csv to a no-op
-# and redirect the save block so only the function definitions are imported.
-# ---------------------------------------------------------------------------
-
 import importlib, types, unittest.mock as mock
 
 def _import_cleaning_functions():
-    """
-    Import pure functions from cleaning.py without triggering its module-level
-    file I/O.  We stop execution right after the function definitions by raising
-    a sentinel exception from the first write operation.
-    """
+    # patch out all file I/O so we only get the function definitions
     import importlib.util, unittest.mock as mock
 
-    # Each read_csv call in cleaning.py expects a different schema.
-    # Supply minimally-valid DataFrames in call order:
-    #   calls 1-4  → daily files (a, b, c, d)
-    #   calls 5-8  → interval files (a, b, c, d)
-    #   call 9     → staffing file
     daily_df = pd.DataFrame({
         'Date': ['01/06/25'],
         'Call Volume': ['100'], 'CCT': ['300'],
         'Service Level': ['95.00%'], 'Abandon Rate': ['1.00%'],
     })
-    # Call Volume and Abandoned Calls must be numeric: clean_interval() does NOT
-    # convert them (relies on pandas auto-parsing from CSV).  In real use this is
-    # fine because pd.read_csv infers numeric types; here we must set them explicitly.
+    # CV and Abandoned Calls come out of read_csv as float64, not strings
     interval_df = pd.DataFrame({
         'Month': ['April'], 'Day': ['1'], 'Interval': ['0:00'],
         'Service Level': ['100.00%'], 'Call Volume': [5.0],
@@ -82,12 +59,7 @@ def _import_cleaning_functions():
 cleaning = _import_cleaning_functions()
 
 
-# ---------------------------------------------------------------------------
-# Helper: build a minimal daily DataFrame
-# ---------------------------------------------------------------------------
-
 def make_daily_df(rows):
-    """rows = list of dicts with keys: Date, Call_Volume, CCT, Service_Level, Abandon_Rate"""
     data = {
         'Date':         [r['Date'] for r in rows],
         'Call Volume':  [r.get('Call Volume',  '100') for r in rows],
@@ -99,7 +71,6 @@ def make_daily_df(rows):
 
 
 def make_interval_df(rows):
-    """rows = list of dicts with interval-level keys."""
     defaults = dict(
         Month='April', Day='1', Interval='0:00',
         **{'Service Level': '100.00%', 'Call Volume': '5',
@@ -109,10 +80,6 @@ def make_interval_df(rows):
     merged = [{**defaults, **r} for r in rows]
     return pd.DataFrame(merged)
 
-
-# ===========================================================================
-# 1. clean_daily
-# ===========================================================================
 
 class TestCleanDaily(unittest.TestCase):
 
@@ -132,8 +99,7 @@ class TestCleanDaily(unittest.TestCase):
         self.assertAlmostEqual(df['Abandon Rate'].iloc[0], 0.025)
 
     def test_cct_passes_through_unchanged(self):
-        # clean_daily does NOT convert CCT (pandas auto-infers it as numeric from CSV).
-        # Verify it stays as a numeric passthrough when already numeric.
+        # clean_daily doesn't touch CCT; pandas already infers it as numeric from CSV
         df = pd.DataFrame({
             'Date': ['01/01/24'], 'Call Volume': ['100'],
             'CCT': [350.0],  # already numeric as it would be from pd.read_csv
@@ -151,10 +117,6 @@ class TestCleanDaily(unittest.TestCase):
         self.assertEqual(df['Call Volume'].iloc[0], 0.0)
         self.assertEqual(df['Abandon Rate'].iloc[0], 0.0)
 
-
-# ===========================================================================
-# 2. clean_interval
-# ===========================================================================
 
 class TestCleanInterval(unittest.TestCase):
 
@@ -174,7 +136,6 @@ class TestCleanInterval(unittest.TestCase):
         self.assertAlmostEqual(df['CCT'].iloc[0], 412.5)
 
     def test_cct_comma_removal(self):
-        # CCT can have commas (clean_interval strips them)
         df = self._clean([{'CCT': '1,200'}])
         self.assertAlmostEqual(df['CCT'].iloc[0], 1200.0)
 
@@ -182,10 +143,6 @@ class TestCleanInterval(unittest.TestCase):
         df = self._clean([{'Service Level': '0.00%'}])
         self.assertAlmostEqual(df['Service Level'].iloc[0], 0.0)
 
-
-# ===========================================================================
-# 3. build_datetime
-# ===========================================================================
 
 class TestBuildDatetime(unittest.TestCase):
 
@@ -210,10 +167,6 @@ class TestBuildDatetime(unittest.TestCase):
         self.assertEqual(df['DateTime'].iloc[0], '2025-05-26 23:30')
 
 
-# ===========================================================================
-# 4. handle_daily_nulls
-# ===========================================================================
-
 class TestHandleDailyNulls(unittest.TestCase):
 
     def _process(self, rows):
@@ -221,12 +174,6 @@ class TestHandleDailyNulls(unittest.TestCase):
         return cleaning.handle_daily_nulls(df)
 
     def test_all_null_row_dropped(self):
-        rows = [
-            {'Date': '01/06/25'},   # Sunday — all metrics will be NaN after clean_daily
-            {'Date': '01/01/24', 'Call Volume': '100', 'CCT': '300',
-             'Service Level': '95.00%', 'Abandon Rate': '1.00%'},
-        ]
-        # Force all-null in first row by passing NaN-producing strings
         df = pd.DataFrame({
             'Date':         ['01/06/25', '01/01/24'],
             'Call Volume':  [None, '100'],
@@ -239,7 +186,6 @@ class TestHandleDailyNulls(unittest.TestCase):
         self.assertEqual(len(result), 1)
 
     def test_partial_null_imputed_with_dow_median(self):
-        # Two Mondays (DOW=0) with known values, one Monday with null CV
         rows_raw = pd.DataFrame({
             'Date':         ['01/06/25', '01/13/25', '01/20/25'],
             'Call Volume':  ['200', '400', None],
@@ -267,16 +213,9 @@ class TestHandleDailyNulls(unittest.TestCase):
         self.assertNotIn('_year', result.columns)
 
 
-# ===========================================================================
-# 5. handle_interval_nulls
-# ===========================================================================
-
 class TestHandleIntervalNulls(unittest.TestCase):
 
     def _base_row(self, **overrides):
-        # Call Volume and Abandoned Calls must be numeric here because
-        # clean_interval() does NOT convert them (it relies on pandas auto-parsing
-        # from CSV).  In tests we must replicate what pd.read_csv produces.
         base = {
             'Month': 'April', 'Day': '1', 'Interval': '0:00',
             'Service Level': '100.00%', 'Call Volume': 5.0,
@@ -301,12 +240,6 @@ class TestHandleIntervalNulls(unittest.TestCase):
         self.assertEqual(len(result), 1)
 
     def test_cv_zero_fills_derived_metrics(self):
-        # Column dtype rules that mirror real pd.read_csv behavior:
-        #   Service Level / Abandoned Rate: raw strings → use None (object dtype)
-        #     so that clean_interval's .str.rstrip('%') succeeds.
-        #   Abandoned Calls / Call Volume: raw numerics → use np.nan (float64)
-        #     so handle_interval_nulls .loc-assignments work in pandas 3.x.
-        #   CCT: uses .astype(str) first → either None or np.nan works.
         rows = [self._base_row(
             **{'Call Volume': 0.0,
                'Service Level': None,
@@ -336,7 +269,6 @@ class TestHandleIntervalNulls(unittest.TestCase):
         self.assertAlmostEqual(result.iloc[0]['Abandoned Calls'], 5.0, places=0)
 
     def test_derive_ar_skips_cv_zero(self):
-        # When CV=0 and AR is missing, should be filled as 0 (step 3), not NaN
         rows = [self._base_row(
             **{'Call Volume': 0.0, 'Abandoned Calls': 0.0, 'Abandoned Rate': None}
         )]
@@ -354,10 +286,6 @@ class TestHandleIntervalNulls(unittest.TestCase):
         result = self._process(rows)
         self.assertNotIn('_dow', result.columns)
 
-
-# ===========================================================================
-# 6. handle_staffing_nulls
-# ===========================================================================
 
 class TestHandleStaffingNulls(unittest.TestCase):
 
@@ -383,11 +311,6 @@ class TestHandleStaffingNulls(unittest.TestCase):
         self.assertNotIn('_dow', result.columns)
 
 
-# ===========================================================================
-# 7. agg.py pure functions (imported directly)
-# ===========================================================================
-
-# Import agg functions without running its file I/O
 def _import_agg_functions():
     import importlib.util, builtins, unittest.mock as mock
 
@@ -396,10 +319,8 @@ def _import_agg_functions():
     )
     mod = importlib.util.module_from_spec(spec)
 
-    # Block file I/O: patch open and csv.DictWriter so no files touched
     real_open = builtins.open
     def patched_open(path, *args, **kwargs):
-        # Allow opening agg.py itself (source read), block CSV I/O
         if str(path).endswith('.csv') or str(path).endswith('.py') is False:
             raise StopIteration('blocked')
         return real_open(path, *args, **kwargs)
@@ -408,7 +329,7 @@ def _import_agg_functions():
         try:
             spec.loader.exec_module(mod)
         except StopIteration:
-            pass  # halted at first open() call; functions are already defined
+            pass
 
     return mod
 
@@ -492,10 +413,6 @@ class TestAggStdDev(unittest.TestCase):
         self.assertGreaterEqual(result, 0.0)
 
 
-# ===========================================================================
-# 8. intraday_shape.py trimmed_mean (slightly different implementation)
-# ===========================================================================
-
 def _import_shape_functions():
     import importlib.util, unittest.mock as mock
 
@@ -551,10 +468,6 @@ class TestShapeTrimmedMean(unittest.TestCase):
         self.assertAlmostEqual(result, 5.0)
 
 
-# ===========================================================================
-# 9. Integration tests — actual output files
-# ===========================================================================
-
 @unittest.skipUnless(os.path.isdir(CLEANED_DIR), 'cleaned_data/ not found')
 class TestIntervalAggregated(unittest.TestCase):
 
@@ -563,7 +476,6 @@ class TestIntervalAggregated(unittest.TestCase):
         cls.df = pd.read_csv(os.path.join(CLEANED_DIR, 'interval_aggregated.csv'))
 
     def test_row_count(self):
-        # 4 groups × 7 days × 48 intervals
         self.assertEqual(len(self.df), 1344,
                          f"Expected 1344 rows, got {len(self.df)}")
 
@@ -636,11 +548,6 @@ class TestIntradayShape(unittest.TestCase):
         self.assertTrue((self.df['daily_call_volume'] > 0).all())
 
     def test_shape_cv_sums_to_one_per_group_dow(self):
-        """
-        Sum of shape_call_volume across 48 intervals for a (group, DOW)
-        should be ~1.0 (±5%) because interval means should sum to ~daily mean.
-        Holiday exclusion can introduce small bias.
-        """
         sums = self.df.groupby(['group', 'day_of_week'])['shape_call_volume'].sum()
         for key, total in sums.items():
             self.assertAlmostEqual(
@@ -649,7 +556,6 @@ class TestIntradayShape(unittest.TestCase):
             )
 
     def test_interval_cv_matches_agg(self):
-        """interval_call_volume in shape must match mean_call_volume in aggregated."""
         agg_df = pd.read_csv(os.path.join(CLEANED_DIR, 'interval_aggregated.csv'))
         merged = self.df.merge(agg_df, on=['group', 'day_of_week', 'interval'])
         diff = (merged['interval_call_volume'] - merged['mean_call_volume']).abs()
@@ -657,7 +563,6 @@ class TestIntradayShape(unittest.TestCase):
                         f"interval_call_volume mismatch, max diff = {diff.max():.6f}")
 
     def test_shape_ratio_consistency(self):
-        """shape = interval / daily; verify the ratio holds."""
         computed = self.df['interval_call_volume'] / self.df['daily_call_volume']
         stored   = self.df['shape_call_volume']
         diff = (computed - stored).abs()
@@ -680,7 +585,6 @@ class TestCleanedDailyFiles(unittest.TestCase):
         for g in ['a', 'b', 'c', 'd']:
             df = pd.read_csv(os.path.join(CLEANED_DIR, f'{g}_daily_cleaned.csv'),
                              encoding='utf-8-sig')
-            # Should parse without error
             dates = pd.to_datetime(df['Date'], format='%m/%d/%y')
             self.assertFalse(dates.isna().any(), f"{g}: unparseable dates")
 
@@ -726,12 +630,7 @@ class TestCleanedIntervalFiles(unittest.TestCase):
                              f"{g}: {null_count} unparseable DateTime values")
 
     def test_interval_count_per_day(self):
-        """
-        Portfolios C and D are near-complete (48 intervals almost every day).
-        Portfolio A has heavy overnight missingness (legitimate — closed overnight);
-        portfolio B has moderate gaps.  Verify at least 38 intervals per day for
-        all portfolios (ensures no whole-day data loss) and exactly 48 for C.
-        """
+        # A closed overnight (legit gaps), B moderate, C/D near-complete
         min_expected = {'a': 38, 'b': 42, 'c': 48, 'd': 47}
         for g in ['a', 'b', 'c', 'd']:
             df = pd.read_csv(os.path.join(CLEANED_DIR, f'{g}_interval_cleaned.csv'),
@@ -756,7 +655,6 @@ class TestCleanedIntervalFiles(unittest.TestCase):
             self.assertTrue((df['Abandoned Rate'] <= 1).all())
 
     def test_apr_jun_2025_coverage(self):
-        """Interval data must cover April, May, June 2025."""
         for g in ['a', 'b', 'c', 'd']:
             df = pd.read_csv(os.path.join(CLEANED_DIR, f'{g}_interval_cleaned.csv'),
                              encoding='utf-8-sig')
@@ -766,15 +664,9 @@ class TestCleanedIntervalFiles(unittest.TestCase):
                 self.assertIn(m, months, f"{g}: missing month {m}")
 
     def test_interval_cv_consistency_with_daily(self):
-        """
-        Sum of interval Call Volume per day vs daily Call Volume.
-
-        NOTE: The two data sources don't always agree perfectly. Observed max diffs:
-          a: 8.4%  b: 13.4%  c: 22.1%  d: 5.9%
-        This is a known data-quality characteristic (likely different counting scopes
-        between interval and daily exports). The test checks that the MEDIAN day is
-        within 2% and that gross outliers (>25%) don't exist.
-        """
+        # interval vs daily CV don't always match (different counting scopes in source system)
+        # observed max diffs: a=8.4%, b=13.4%, c=22.1%, d=5.9%
+        # just check median day ≤ 2% and no gross outliers (>25%)
         for g in ['a', 'b', 'c', 'd']:
             interval_df = pd.read_csv(
                 os.path.join(CLEANED_DIR, f'{g}_interval_cleaned.csv'), encoding='utf-8-sig')

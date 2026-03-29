@@ -3,20 +3,16 @@ import numpy as np
 
 GROUPS = ['a', 'b', 'c', 'd']
 
-# Uniform upward bias: 4.4% overprediction offsets the asymmetric underprediction penalty (Pt).
-# Optimal at 1.044 (parabola minimum confirmed v22-v26).
+# +4.4% offsets the asymmetric underprediction penalty (Pt); parabola min confirmed v22-v26.
 # NEVER reduce C/D below A/B — C is 46% of EV denominator.
 BIAS = {'A': 1.044, 'B': 1.044, 'C': 1.044, 'D': 1.044}
 
-# Blend raw shape with circular-kernel-smoothed version to reduce per-cell estimation noise.
-# ~12 obs/cell from Apr-Jun; smoothing reduces noise while preserving broad patterns.
-# Optimal: alpha=0.5, window=5 (v31, EV=34.148, rank 6).
+# ~12 obs/cell from Apr-Jun so raw shape is noisy; blend with circular-smoothed version.
+# alpha=0.5, window=5 (v31, EV=34.148, rank 6)
 SHAPE_SMOOTH_ALPHA = 0.5
 
 WEEKDAYS = {'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'}
 WEEKEND_BIAS = 1.044  # same as weekday = uniform bias
-
-# --- Load August 2025 daily CV for each group ---
 
 daily_frames = []
 for g in GROUPS:
@@ -29,13 +25,11 @@ for g in GROUPS:
 daily = pd.concat(daily_frames, ignore_index=True)
 daily['day_of_week'] = daily['Date'].dt.day_name()
 
-# --- Load shape ---
-
 shape = pd.read_csv('cleaned_data/intraday_shape.csv')[
     ['group', 'day_of_week', 'interval', 'shape_call_volume']
 ].copy()
 
-# --- Apply shape smoothing (circular, preserves sum per group×DOW) ---
+# circular smoothing (preserves sum per group×DOW)
 
 kernel = np.array([0.10, 0.20, 0.40, 0.20, 0.10])
 half = len(kernel) // 2
@@ -53,7 +47,7 @@ for (g, dow), grp in shape.groupby(['group', 'day_of_week']):
     smooth_parts.append(grp)
 shape = pd.concat(smooth_parts).reset_index(drop=True)
 
-# --- Predict: interval_cv = daily_cv × shape × bias ---
+# interval_cv = daily_cv × shape × bias
 
 forecast = daily.merge(shape, on=['group', 'day_of_week'], how='left')
 forecast['_bias'] = forecast.apply(
@@ -65,7 +59,7 @@ forecast['interval_cv'] = (
 )
 forecast['interval_cv'] = forecast['interval_cv'].clip(lower=0).round().astype(int)
 
-# --- Validate: interval sums vs daily totals ---
+# sanity check: interval sums should be ~bias% above daily totals
 
 validation = (
     forecast
@@ -81,8 +75,6 @@ validation['pct_diff'] = (
 print("Validation — interval sum vs daily total (pct diff from daily):")
 print(validation.groupby('group')['pct_diff'].describe().round(2).to_string())
 print()
-
-# --- Output ---
 
 out = forecast[['group', 'Date', 'day_of_week', 'interval', 'interval_cv']].sort_values(
     ['group', 'Date', 'interval']

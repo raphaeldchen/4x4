@@ -1,14 +1,14 @@
 import csv
+import datetime
 from collections import defaultdict
 import math
 import os
 
 GROUPS = ['a', 'b', 'c', 'd']
 
-# Months to include when building the interval shape (must match SHAPE_MONTHS in intraday_shape.py).
+# keep in sync with intraday_shape.py
 SHAPE_MONTHS = [4, 5, 6]
 
-# Dates to exclude from the shape calculation (must match EXCLUDE_DATES in intraday_shape.py).
 EXCLUDE_DATES = {
     '2025-04-18',  # Good Friday      — 7-13% below normal Friday
     '2025-04-20',  # Easter Sunday     — 40-55% below normal Sunday; morning-shifted shape
@@ -35,13 +35,9 @@ DAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday',
 def parse_datetime(dt_str):
     date_part, time_part = dt_str.strip().split(' ')
     year, month, day = map(int, date_part.split('-'))
-    import datetime
-    d = datetime.date(year, month, day)
-    return d.weekday(), time_part[:5]
+    return datetime.date(year, month, day).weekday(), time_part[:5]
 
 def trimmed_mean(values, trim=1):
-    """Drop `trim` lowest and `trim` highest values, return mean of remainder.
-    Falls back to plain mean if not enough observations to trim."""
     if len(values) <= 2 * trim:
         return sum(values) / len(values)
     s = sorted(values)
