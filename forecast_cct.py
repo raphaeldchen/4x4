@@ -1,13 +1,16 @@
 """
 Forecast interval-level CCT for August 2025.
-Method: August daily CCT (known) × blended shape ratio.
 
 SHAPE_MODE options:
-  'shaped' — full Apr-Jun intraday shape ratio (scored 20% EC — worse than flat)
-  'flat'   — daily CCT uniformly across all intervals (scored 16.77% EC)
-  'blend'  — weighted mix: α × shape + (1-α) × 1.0
-             α=0 is equivalent to flat, α=1 is equivalent to shaped
-             tune ALPHA between 0 and 1 to find the sweet spot
+  'shaped'       — daily_cct_aug × shape_ratio  (shape_ratio = apr-jun_interval / apr-jun_daily)
+                   scored 20% EC — worse than flat
+  'flat'         — daily_cct_aug uniformly across all intervals (scored 16.77% EC)
+  'blend'        — daily_cct_aug × (α × shape_ratio + (1-α) × 1.0)
+                   α=0 = flat, α=1 = shaped. Monotonically improving up to α=0.7 (15.56% EC).
+  'direct_blend' — α × interval_cct_aprjun + (1-α) × daily_cct_aug
+                   Analogous to ABD direct_blend: blends observed Apr-Jun interval CCT with
+                   August daily CCT directly, avoiding ratio amplification when Aug daily
+                   CCT differs from Apr-Jun daily CCT.
 
 CCT is set to 0 for any interval where forecasted CV = 0 (excluded from scoring).
 """
@@ -16,16 +19,15 @@ import pandas as pd
 
 GROUPS = ['a', 'b', 'c', 'd']
 
-SHAPE_MODE = 'blend'
+SHAPE_MODE = 'direct_blend'
 
-# Blend weight: how much of the Apr-Jun CCT shape to apply.
-# 0.0 = fully flat (16.77% EC), 1.0 = fully shaped (20.00% EC)
-# Try 0.1, 0.2, 0.3 in sequence to find if any partial shape helps.
-ALPHA = 0.7
+# For blend: how much of the Apr-Jun CCT shape ratio to apply.
+# For direct_blend: weight on Apr-Jun observed interval CCT vs August daily CCT.
+# blend α=0.7 scored 15.56% EC (best so far); try 0.9 and 1.0 next.
+ALPHA = 1.0
 
 # Upward bias per group (applies in all modes).
 # Bias doesn't affect EC (symmetric metric) but helps Pt.
-# Keep at 1.0 until ALPHA is tuned, to isolate the blend effect.
 BIAS = {
     'A': 1.0,
     'B': 1.0,
@@ -36,7 +38,7 @@ BIAS = {
 # --- Load shape ---
 
 shape = pd.read_csv('cleaned_data/intraday_shape.csv')[
-    ['group', 'day_of_week', 'interval', 'shape_cct']
+    ['group', 'day_of_week', 'interval', 'shape_cct', 'interval_cct']
 ]
 
 # --- Load August 2025 daily CCT for each group ---
@@ -65,7 +67,14 @@ elif SHAPE_MODE == 'flat':
 elif SHAPE_MODE == 'blend':
     blended = ALPHA * forecast['shape_cct'] + (1 - ALPHA) * 1.0
 
-forecast['interval_cct'] = forecast['CCT'] * blended * forecast['group'].map(BIAS)
+if SHAPE_MODE in ('shaped', 'flat', 'blend'):
+    forecast['interval_cct'] = forecast['CCT'] * blended * forecast['group'].map(BIAS)
+elif SHAPE_MODE == 'direct_blend':
+    forecast['interval_cct'] = (
+        ALPHA * forecast['interval_cct'] +
+        (1 - ALPHA) * forecast['CCT']
+    ) * forecast['group'].map(BIAS)
+
 forecast['interval_cct'] = forecast['interval_cct'].clip(lower=0).round(2)
 
 # --- Zero out CCT where CV forecast is zero ---
