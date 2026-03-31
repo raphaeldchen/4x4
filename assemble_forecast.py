@@ -41,27 +41,9 @@ col_order = ['Month', 'Day', 'Interval'] + [
 ]
 
 wide = wide.rename(columns={'interval': 'Interval'})
-
-# Strip leading zero from hour to match raw data format: '00:00' -> '0:00', '09:30' -> '9:30'
 wide['Interval'] = wide['Interval'].str.lstrip('0').str.replace('^:', '0:', regex=True)
-
-# Cap Abandoned_Rate at 0.95 (100% abandon rate is unrealistic and may fail validation)
 for g in groups:
     wide[f'Abandoned_Rate_{g}'] = wide[f'Abandoned_Rate_{g}'].clip(upper=0.95)
-
 wide = wide[col_order].sort_values(['Month', 'Day', 'Interval']).reset_index(drop=True)
-
-print(f"Rows:    {len(wide)} (expected {31 * 48} = {31*48})")
-print(f"Columns: {len(wide.columns)} (expected {3 + 4*4} = {3 + 16})")
-print(f"\nSample (first 3 rows):")
-print(wide.head(3).to_string())
-print(f"\nNegative values check:")
-for col in wide.columns[3:]:
-    negs = (wide[col] < 0).sum()
-    if negs:
-        print(f"  WARNING: {negs} negative values in {col}")
-print("  No negative values found." if not any((wide[col] < 0).any() for col in wide.columns[3:]) else "")
-
 out_path = 'forecasts/forecast_v42.csv'
 wide.to_csv(out_path, index=False)
-print(f"\nWrote {len(wide)} rows to {out_path}")

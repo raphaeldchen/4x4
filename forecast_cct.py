@@ -3,7 +3,7 @@ import pandas as pd
 GROUPS = ['a', 'b', 'c', 'd']
 
 # high-CV slots: blend Apr-Jun shape with August daily (90/10)
-# low-CV overnight slots: flat daily CCT — Apr-Jun overnight mean is too noisy
+# low-CV slots: flat daily CCT
 ALPHA = 0.9
 CV_THRESHOLD = 15
 
@@ -18,14 +18,10 @@ for g in GROUPS:
     df['group'] = g.upper()
     df = df[(df['Date'].dt.year == 2025) & (df['Date'].dt.month == 8)]
     daily_frames.append(df[['group', 'Date', 'CCT']])
-
 daily = pd.concat(daily_frames, ignore_index=True)
 daily['day_of_week'] = daily['Date'].dt.day_name()
 
-# need CV forecast to gate on interval_cv < CV_THRESHOLD
-
 forecast = daily.merge(shape, on=['group', 'day_of_week'], how='left')
-
 cv = pd.read_csv('forecasts/cv_forecast.csv')
 cv['Date'] = pd.to_datetime(cv['Date'])
 forecast = forecast.merge(
@@ -34,20 +30,15 @@ forecast = forecast.merge(
     how='left'
 )
 
-# default flat; override for high-CV slots
-
 high_cv = forecast['interval_cv'] >= CV_THRESHOLD
-forecast['interval_cct_pred'] = forecast['CCT'].copy()  # default: flat daily CCT
+forecast['interval_cct_pred'] = forecast['CCT'].copy()  # defaults flat daily CCT
 forecast.loc[high_cv, 'interval_cct_pred'] = (
     ALPHA * forecast.loc[high_cv, 'interval_cct'] +
     (1 - ALPHA) * forecast.loc[high_cv, 'CCT']
 )
 
 forecast['interval_cct_pred'] = forecast['interval_cct_pred'].clip(lower=0).round(2)
-
-# no calls → no talk time
 forecast.loc[forecast['interval_cv'] == 0, 'interval_cct_pred'] = 0
-
 n_gated = (forecast['interval_cv'] < CV_THRESHOLD).sum()
 validation = (
     forecast
@@ -58,15 +49,7 @@ validation = (
     )
 )
 validation['ratio'] = (validation['interval_cct_pred_mean'] / validation['aug_daily_mean']).round(4)
-print(f"cv_gated | ALPHA={ALPHA} | CV_THRESHOLD={CV_THRESHOLD} ({n_gated} intervals use flat)")
-print("Validation — mean interval CCT vs Aug daily CCT:")
-print(validation.round(2).to_string())
-print()
-
 out = forecast[['group', 'Date', 'day_of_week', 'interval', 'interval_cct_pred']].rename(
     columns={'interval_cct_pred': 'interval_cct'}
 ).sort_values(['group', 'Date', 'interval']).reset_index(drop=True)
-
 out.to_csv('forecasts/cct_forecast.csv', index=False)
-print(f"Wrote {len(out)} rows to forecasts/cct_forecast.csv")
-print(f"Expected {4 * 31 * 48} rows (4 groups × 31 days × 48 intervals)")

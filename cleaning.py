@@ -65,17 +65,12 @@ def build_datetime(df):
     return df
 
 def handle_daily_nulls(df):
-    # drop all-null rows; impute partials with same-DOW same-year median
-    # (falls back to all-years DOW median if fewer than 3 peers)
     metrics = ['Call Volume', 'CCT', 'Service Level', 'Abandon Rate']
     df = df.copy()
-
     dates = pd.to_datetime(df['Date'], format='%m/%d/%y')
     df['_dow'] = dates.dt.dayofweek
     df['_year'] = dates.dt.year
-
     df = df[~df[metrics].isnull().all(axis=1)].copy()
-
     for metric in metrics:
         for idx in df.index[df[metric].isnull()]:
             dow, year = df.at[idx, '_dow'], df.at[idx, '_year']
@@ -85,20 +80,14 @@ def handle_daily_nulls(df):
             else:
                 all_years = df[(df['_dow'] == dow) & df[metric].notna()][metric]
                 df.at[idx, metric] = all_years.median() if not all_years.empty else None
-
     return df.drop(columns=['_dow', '_year'])
 
 
 def handle_interval_nulls(df):
-    # drop fully-null rows; recover Interval for partial rows by matching
-    # blank-row count to missing slots that day; fill CV=0 rows; derive
-    # AR/AC where possible; DOW-median impute the rest
     metrics = ['Service Level', 'Call Volume', 'Abandoned Calls', 'Abandoned Rate', 'CCT']
     df = df.copy()
-
     drop_mask = df['Interval'].isnull() & df[metrics].isnull().all(axis=1)
     df = df[~drop_mask].copy()
-
     blank_iv = df[df['Interval'].isnull() & df[metrics].notna().any(axis=1)]
     for (month, day), group in blank_iv.groupby(['Month', 'Day']):
         present = set(df[(df['Month'] == month) & (df['Day'] == day) & df['Interval'].notna()]['Interval'])
@@ -135,7 +124,7 @@ def handle_interval_nulls(df):
         df.loc[can_derive_ac, 'Abandoned Rate'] * df.loc[can_derive_ac, 'Call Volume']
     ).round()
 
-    # same-DOW same-month median per metric; fallback to all-month DOW median
+    # same-DOW same-month median per metric, fallback to all-month DOW median
     df['_dow'] = pd.to_datetime(df['Date'], format='%m/%d/%y').dt.dayofweek
 
     for metric in metrics:
@@ -175,7 +164,6 @@ def handle_staffing_nulls(df):
             dow = df.at[idx, '_dow']
             peers = df[(df['_dow'] == dow) & df[col].notna()][col]
             df.at[idx, col] = peers.median() if not peers.empty else None
-
     return df.drop(columns=['_dow'])
 
 a_daily = handle_daily_nulls(clean_daily(a_daily))
@@ -201,5 +189,3 @@ c_interval.to_csv(cleaned('c_interval_cleaned.csv'), index=False, encoding='utf-
 d_interval.to_csv(cleaned('d_interval_cleaned.csv'), index=False, encoding='utf-8-sig')
 
 daily_staffing.to_csv(cleaned('daily_staffing_cleaned.csv'), index=False, encoding='utf-8-sig')
-
-print("Cleaned files written to", CLEANED_DIR)

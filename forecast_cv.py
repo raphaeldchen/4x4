@@ -3,16 +3,14 @@ import numpy as np
 
 GROUPS = ['a', 'b', 'c', 'd']
 
-# +4.4% offsets the asymmetric underprediction penalty (Pt); parabola min confirmed v22-v26.
-# NEVER reduce C/D below A/B — C is 46% of EV denominator.
+# dont reduce C/D below A/B
 BIAS = {'A': 1.044, 'B': 1.044, 'C': 1.044, 'D': 1.044}
 
-# ~12 obs/cell from Apr-Jun so raw shape is noisy; blend with circular-smoothed version.
-# alpha=0.5, window=5 (v31, EV=34.148, rank 6)
+# ~12 obs/cell from Apr-Jun so raw shape is noisy, blend with circular-smoothed version.
 SHAPE_SMOOTH_ALPHA = 0.5
 
 WEEKDAYS = {'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'}
-WEEKEND_BIAS = 1.044  # same as weekday = uniform bias
+WEEKEND_BIAS = 1.044
 
 daily_frames = []
 for g in GROUPS:
@@ -28,8 +26,6 @@ daily['day_of_week'] = daily['Date'].dt.day_name()
 shape = pd.read_csv('cleaned_data/intraday_shape.csv')[
     ['group', 'day_of_week', 'interval', 'shape_call_volume']
 ].copy()
-
-# circular smoothing (preserves sum per group×DOW)
 
 kernel = np.array([0.10, 0.20, 0.40, 0.20, 0.10])
 half = len(kernel) // 2
@@ -47,8 +43,6 @@ for (g, dow), grp in shape.groupby(['group', 'day_of_week']):
     smooth_parts.append(grp)
 shape = pd.concat(smooth_parts).reset_index(drop=True)
 
-# interval_cv = daily_cv × shape × bias
-
 forecast = daily.merge(shape, on=['group', 'day_of_week'], how='left')
 forecast['_bias'] = forecast.apply(
     lambda r: BIAS[r['group']] if r['day_of_week'] in WEEKDAYS else WEEKEND_BIAS,
@@ -58,8 +52,6 @@ forecast['interval_cv'] = (
     forecast['Call Volume'] * forecast['shape_call_volume'] * forecast['_bias']
 )
 forecast['interval_cv'] = forecast['interval_cv'].clip(lower=0).round().astype(int)
-
-# sanity check: interval sums should be ~bias% above daily totals
 
 validation = (
     forecast

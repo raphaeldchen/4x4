@@ -2,8 +2,6 @@ import pandas as pd
 
 GROUPS = ['a', 'b', 'c', 'd']
 
-# use Apr-Jun interval rates directly — ratio amplification on opening/closing slots
-# (43%+ abandon) would push predictions over 100% if scaled by an August level shift
 ALPHA = 1.0
 
 shape = pd.read_csv('cleaned_data/intraday_shape.csv')[
@@ -17,12 +15,10 @@ for g in GROUPS:
     df['group'] = g.upper()
     df = df[(df['Date'].dt.year == 2025) & (df['Date'].dt.month == 8)]
     daily_frames.append(df[['group', 'Date', 'Abandon Rate']])
-
 daily = pd.concat(daily_frames, ignore_index=True)
 daily['day_of_week'] = daily['Date'].dt.day_name()
 
 forecast = daily.merge(shape, on=['group', 'day_of_week'], how='left')
-
 forecast['interval_abd'] = (
     ALPHA * forecast['interval_abandoned_rate'] +
     (1 - ALPHA) * forecast['Abandon Rate']
@@ -38,15 +34,8 @@ validation = (
     )
 )
 validation['ratio'] = (validation['interval_abd_mean'] / validation['daily_abd_mean']).round(4)
-print(f"direct_blend | ALPHA={ALPHA}")
-print("Validation — mean interval ABD vs mean daily ABD:")
-print(validation.round(6).to_string())
-print()
 
 out = forecast[['group', 'Date', 'day_of_week', 'interval', 'interval_abd']].sort_values(
     ['group', 'Date', 'interval']
 ).reset_index(drop=True)
-
 out.to_csv('forecasts/abd_forecast.csv', index=False)
-print(f"Wrote {len(out)} rows to forecasts/abd_forecast.csv")
-print(f"Expected {4 * 31 * 48} rows (4 groups × 31 days × 48 intervals)")
