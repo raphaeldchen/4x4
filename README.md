@@ -1,6 +1,12 @@
-our code uses all the daily csv files and interval csv files for the 4 clients, as well as the staffing data
+# 2026 Synchrony Datathon — Call Center Staffing Forecasting
 
-run these files in order:
+Uses daily and interval CSV files for 4 clients (A–D), plus staffing data, to forecast call volume, abandoned calls/rate, and CCT at 30-minute intervals.
+
+## Usage
+
+Run the pipeline in order:
+
+```
 python cleaning.py
 python agg.py
 python intraday_shape.py
@@ -8,6 +14,10 @@ python forecast_cv.py
 python forecast_cct.py
 python forecast_abd.py
 python assemble_forecast.py
+```
 
-here is a link to the video:
-https://drive.google.com/file/d/1CLR68AGvBmEGFr20AMNutlhiFKx53pkn/view?usp=sharing
+Output is written to `forecasts/`.
+
+## Demo
+
+[Video walkthrough](https://drive.google.com/file/d/1CLR68AGvBmEGFr20AMNutlhiFKx53pkn/view?usp=sharing)
